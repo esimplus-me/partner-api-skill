@@ -1,0 +1,17 @@
+{
+  "skills": ["partner-api-skill"],
+  "query": "Review this error handler for our eSIM Plus partner integration: it does `if (res.status === 422) showFieldErrors(body.errors)` and `if (res.status === 404) return null`, and retries every failed request 3 times with backoff.",
+  "files": [],
+  "should_trigger": true,
+  "expected_behavior": [
+    "Identifies that dispatch must be on the domain code, not the HTTP status",
+    "Explains both envelopes and that a 422 has no per-field errors map",
+    "Flags the blanket retry as unsafe for POST /phone-numbers"
+  ],
+  "assertions": [
+    "Mentions that one HTTP status carries several domain codes and lists at least two codes for 404 (e.g. 1307, 1311, 1321, 1324, 1325, 1329)",
+    "States that Envelope B (422/429) has no `code` and no per-field `errors` map, so `body.errors` is wrong",
+    "States that POST /phone-numbers is not idempotent and must not be auto-retried",
+    "Does not invent error codes outside 1301-1329, and does not use the retired 1316-1318, 1320 or 1328"
+  ]
+}

@@ -1,0 +1,26 @@
+{
+  "name": "esimplus",
+  "owner": {
+    "name": "eSIM Plus",
+    "url": "https://esimplus.me"
+  },
+  "metadata": {
+    "description": "Agent skills published by eSIM Plus for partners integrating our APIs.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "partner-api-skill",
+      "source": "./",
+      "description": "Integrate the eSIM Plus Partner API correctly: catalog, single and bulk number purchase, quoting, tags, inbound SMS, wallet, signed webhooks.",
+      "version": "1.0.0",
+      "author": {
+        "name": "eSIM Plus",
+        "url": "https://esimplus.me"
+      },
+      "homepage": "https://github.com/esimplus-me/partner-api-skill",
+      "license": "MIT",
+      "keywords": ["esimplus", "partner-api", "virtual-numbers", "webhooks"]
+    }
+  ]
+}

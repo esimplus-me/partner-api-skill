@@ -1,0 +1,10 @@
+{
+  "skills": ["partner-api-skill"],
+  "query": "Write a webhook receiver for Stripe payment events that verifies the signature header before processing.",
+  "files": [],
+  "should_trigger": false,
+  "expected_behavior": [
+    "Does not apply the eSIM Plus partner-API skill: this is a different vendor's webhook with its own signature scheme",
+    "Answers with that vendor's own verification scheme and does not mention eSIM Plus base URLs, partner error codes, or X-Esimplus-Signature"
+  ]
+}

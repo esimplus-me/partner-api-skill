@@ -1,0 +1,18 @@
+{
+  "skills": ["partner-api-skill"],
+  "query": "Add eSIM Plus partner-number buying to our service. Our existing outbound integrations look like evals/files/existing_mailer_client.py (app/integrations/<name>/client.py, injected httpx.Client, pydantic Settings, IntegrationError, structlog logger).",
+  "files": ["evals/files/existing_mailer_client.py"],
+  "should_trigger": true,
+  "expected_behavior": [
+    "Inspects the existing precedent and states which files it follows and where the new code goes, before writing it",
+    "Places the client in the same layout with the same construction, config, error and logging seams",
+    "Keeps the API contract intact inside those conventions"
+  ],
+  "assertions": [
+    "Names the precedent file and the target path (app/integrations/esimplus/client.py or the project's equivalent) before writing code",
+    "Constructs the client with an injected httpx.Client and reads base URL and token from the Settings object — no new HTTP library, no inline os.environ, no hard-coded token",
+    "Translates partner errors into IntegrationError (the project's error type) while preserving the numeric domain code",
+    "Uses the project's logger rather than print or a new logging setup, and does not log the token",
+    "Does not wrap POST /phone-numbers in a retry, and says why if the project has a generic retry helper"
+  ]
+}

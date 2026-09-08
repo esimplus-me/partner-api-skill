@@ -1,0 +1,1689 @@
+openapi: 3.1.0
+info:
+  title: eSIM Plus Partner API
+  version: 1.0.0
+  description: >-
+    Integration contract for the eSIM Plus Partner API: buy and manage virtual
+    phone numbers one at a time or in bulk, organize them with tags, and read
+    the SMS they receive.
+
+    - Every success body is `{ "data": <payload> }`; list endpoints add a
+      sibling `pagination` (offset-based, no `total`).
+    - `DELETE` endpoints return 204 No Content with an empty body. - Money:
+    phone-number `price.amount` is a major-unit decimal number, NOT
+      minor units.
+    - Errors use two envelopes. **Envelope A** carries a numeric domain `code`
+      and is modelled as `ApiError` — dispatch on that `code`, not on the HTTP
+      status, because one status can carry several codes. **Envelope B** is a
+      framework validation error with **no** `code` and no per-field map,
+      modelled as `ValidationError`; dispatch on its `message`.
+servers:
+  - url: https://api.esimplus.net/api/partner/v1
+    description: Base path for every endpoint in this contract.
+security:
+  - bearerAuth: []
+tags:
+  - name: catalog
+  - name: numbers
+  - name: sms
+paths:
+  /phone-numbers/countries:
+    get:
+      tags:
+        - catalog
+      summary: List countries that have available virtual numbers
+      responses:
+        "200":
+          description: Countries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        country:
+                          type: string
+                          description: English display name
+                        isoName2:
+                          type: string
+                          description: ISO 3166-1 alpha-2
+                        prefix:
+                          type: string
+                          description: Dialing prefix
+                          e.g. "1": null
+                      required:
+                        - country
+                        - isoName2
+                        - prefix
+                required:
+                  - data
+        "401": &a8
+          description: Domain error (dispatch on `code`, not HTTP status)
+          content:
+            application/json:
+              schema: &a3
+                type: object
+                description: Envelope A — domain error, dispatch on `code`.
+                properties:
+                  success:
+                    type: boolean
+                    const: false
+                  status:
+                    type: integer
+                    description: HTTP status
+                  message:
+                    type: string
+                  code:
+                    type: integer
+                    description: Domain error code. Dispatch on this value rather than on the HTTP
+                      status — one status can carry several codes. Each endpoint
+                      below documents the codes it can return.
+                  errors:
+                    type: object
+                    description: 'Only populated for code 1304 (`{ isoCodes: string[] }`) and code
+                      1314 (`{ code: "<regionCode>" }`).'
+                    additionalProperties: true
+                required:
+                  - success
+                  - status
+                  - message
+                  - code
+  /phone-numbers/countries/{iso_name2}/catalog:
+    get:
+      tags:
+        - catalog
+      summary: List available numbers in a country
+      parameters:
+        - name: iso_name2
+          in: path
+          required: true
+          description: ISO 3166-1 alpha-2 country code
+          schema:
+            type: string
+            minLength: 2
+            maxLength: 2
+        - name: type
+          in: query
+          schema: &a1
+            type: string
+            enum:
+              - local
+              - mobile
+        - name: features
+          in: query
+          description: Capability filter. Case-sensitive; only "SMS" is accepted. Response
+            items still emit lowercase feature values.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - SMS
+        - name: region
+          in: query
+          description: Region/state code (e.g. US state "DC"). See US_STATES on the FE.
+          schema:
+            type: string
+            maxLength: 32
+        - name: reserved
+          in: query
+          schema:
+            type: boolean
+        - &a4
+          name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - &a5
+          name: perPage
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 30
+      responses:
+        "200":
+          description: Catalog page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        msisdn:
+                          type: string
+                        displayNumber:
+                          type: string
+                        countryCode:
+                          type: string
+                          description: ISO alpha-2
+                        region:
+                          type:
+                            - string
+                            - "null"
+                        locality:
+                          type:
+                            - string
+                            - "null"
+                        type: *a1
+                        features:
+                          type: array
+                          items: &a6
+                            type: string
+                            description: A number capability as emitted on resources (lowercase). The
+                              catalog-filter query param is a separate,
+                              case-sensitive value ("SMS" only) — see the
+                              `features` parameter on the catalog endpoint.
+                            enum:
+                              - sms
+                              - voice
+                              - mms
+                        isKycRequired:
+                          type: boolean
+                        price: &a2
+                          type: object
+                          description: Major-unit decimal amount (e.g. 1.5). NOT cents.
+                          properties:
+                            amount:
+                              type: number
+                            currency:
+                              type: string
+                              examples:
+                                - USD
+                          required:
+                            - amount
+                            - currency
+                        discountedPrice:
+                          oneOf:
+                            - *a2
+                            - type: "null"
+                          description: >-
+                            What buying THIS number right now would actually
+                            charge, priced server-side at `activeNumbers + 1` —
+                            a number counts toward its own tier, so a partner
+                            holding 5 sees the Startup rate here on their 6th.
+                            Read against the sibling `price` as "lists at / you
+                            pay".
+
+                            Null means no discount is involved, which is a
+                            DIFFERENT fact from a discount of zero: render null
+                            as no discount indicator at all, never as "−0%".
+                            Null whenever the discount feature is off, the
+                            partner is on a 0% level, or the wallet is disabled.
+
+                            Do NOT recompute this from `price` and
+                            `discountPercent`: the backend quantises in integer
+                            micros so the quoted and the charged price agree
+                            exactly, and recomputing in JS disagrees for some
+                            inputs.
+                        discountPercent:
+                          type:
+                            - integer
+                            - "null"
+                          minimum: 0
+                          maximum: 100
+                          description: The rate that produced `discountedPrice`, for display only. Null
+                            exactly when `discountedPrice` is null — the two
+                            always move together, so a client may treat "both
+                            present and rate > 0" as the single test for whether
+                            a discount applies.
+                      required:
+                        - msisdn
+                        - displayNumber
+                        - countryCode
+                        - type
+                        - features
+                        - isKycRequired
+                        - price
+                  pagination: &a7
+                    type: object
+                    description: Offset-based pagination. No `total`/`lastPage`/`count`.
+                    properties:
+                      page:
+                        type: integer
+                        minimum: 1
+                      perPage:
+                        type: integer
+                        minimum: 1
+                        maximum: 50
+                      hasMore:
+                        type: boolean
+                    required:
+                      - page
+                      - perPage
+                      - hasMore
+                required:
+                  - data
+                  - pagination
+        "403":
+          description: Country is not available for this partner (code 1305)
+          content:
+            application/json:
+              schema: *a3
+        "422":
+          description: One or more country ISO codes are invalid (code 1304,
+            errors.isoCodes)
+          content:
+            application/json:
+              schema: *a3
+  /phone-numbers:
+    get:
+      tags:
+        - numbers
+      summary: List the partner's purchased numbers
+      parameters:
+        - name: country
+          in: query
+          description: Free-text country search (case-insensitive substring against the
+            country name; a 2-letter ISO code also matches). Sent verbatim from
+            the `/numbers` filter input — do NOT constrain to an ISO code.
+            Requires at least 1 character (422, code 1306, if empty).
+          schema:
+            type: string
+            minLength: 1
+        - name: type
+          in: query
+          schema: *a1
+        - name: msisdn
+          in: query
+          schema:
+            type: string
+            maxLength: 20
+        - name: sort
+          in: query
+          description: "Field to sort by — `createdAt` (purchase date), `msisdn` (number),
+            or `paidUntil` (paid-until date). For `paidUntil`, numbers with no
+            active billing (null `paidUntil`) sort as the earliest/empty value:
+            they trail on `desc` and lead on `asc`."
+          schema:
+            type: string
+            enum:
+              - createdAt
+              - msisdn
+              - paidUntil
+        - name: order
+          in: query
+          description: Sort direction; applies when `sort` is set. Defaults to `desc`.
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: desc
+        - name: tags
+          in: query
+          description: "Tag ids to filter by (repeatable). Match-ANY: a number is returned
+            if it carries at least one of the given tags."
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: integer
+        - *a4
+        - *a5
+      responses:
+        "200":
+          description: Purchased numbers page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: &a9
+                      type: object
+                      properties:
+                        msisdn:
+                          type: string
+                        sid:
+                          type: string
+                          description: ULID
+                        countryCode:
+                          type: string
+                          description: ISO alpha-2
+                        region:
+                          type:
+                            - string
+                            - "null"
+                        locality:
+                          type:
+                            - string
+                            - "null"
+                        type: *a1
+                        features:
+                          type: array
+                          items: *a6
+                        tagIds:
+                          type: array
+                          items:
+                            type: integer
+                        status:
+                          type: integer
+                          description: "Live partner-facing statuses only: 1 active, 3 pending, 4 released
+                            (grace)"
+                          enum:
+                            - 1
+                            - 3
+                            - 4
+                        releasedAt:
+                          type:
+                            - string
+                            - "null"
+                          format: date-time
+                        gracePeriodEndsAt:
+                          type:
+                            - string
+                            - "null"
+                          format: date-time
+                          description: Release grace — non-null only when `status` is 4. This is the
+                            window after you release a number, during which it
+                            is still yours and can be re-claimed. **Distinct
+                            from `billingGraceEndsAt`**, which is the
+                            payment-grace window on a number you still own; the
+                            two are independent and can never be substituted for
+                            each other.
+                        price: *a2
+                        createdAt:
+                          type: string
+                          format: date-time
+                        paidFrom:
+                          type:
+                            - string
+                            - "null"
+                          format: date-time
+                          description: Start of the current paid period (progress-circle denominator).
+                            Null when the number is not being billed (e.g.
+                            pending/released, or a wallet-disabled partner where
+                            numbers are free).
+                        paidUntil:
+                          type:
+                            - string
+                            - "null"
+                          format: date-time
+                          description: End of the current paid period — the "paid until" date. By standard
+                            a number is paid one month at a time. Null when not
+                            billed.
+                        billingState:
+                          type: string
+                          enum:
+                            - active
+                            - grace
+                          description: Payment axis, ORTHOGONAL to `status`. 'grace' = the monthly billing
+                            failed and the number is in the 10-day payment-grace
+                            countdown (billingGraceEndsAt), still owned.
+                            Defaults to 'active'.
+                        billingGraceEndsAt:
+                          type:
+                            - string
+                            - "null"
+                          format: date-time
+                          description: End of the 10-day payment-grace window. Non-null only when
+                            billingState == 'grace'. NOT the same as
+                            gracePeriodEndsAt.
+                        billingPrice:
+                          oneOf:
+                            - type: object
+                              description: "What a number's next monthly renewal will actually debit, plus the
+                                discount that produced it. Distinct from
+                                `Price`, which is the number's list price and
+                                never moves: this one carries the partner's
+                                CURRENT tier, so it moves when their fleet does
+                                — including upward when the fleet shrinks."
+                              properties:
+                                amount:
+                                  type: number
+                                  description: "The amount the next renewal will debit — already discounted. A
+                                    major-unit decimal, NOT cents. Do not
+                                    re-apply the discount to it, and do not
+                                    recompute it from `baseAmount` and
+                                    `discountPercent`: the backend quantises in
+                                    integer micros so the quoted and the charged
+                                    price agree exactly, and recomputing in JS
+                                    disagrees for some inputs."
+                                  examples:
+                                    - 4
+                                currency:
+                                  type: string
+                                  examples:
+                                    - USD
+                                baseAmount:
+                                  type:
+                                    - number
+                                    - "null"
+                                  description: 'What the discount was taken off — the arithmetic base of
+                                    `discountPercent`. A major-unit decimal, NOT
+                                    cents. `null` when no discount was applied,
+                                    which is a DIFFERENT fact from a discount of
+                                    zero: render `null` as no discount indicator
+                                    at all, never as "−0%".'
+                                  examples:
+                                    - 5
+                                discountPercent:
+                                  type:
+                                    - integer
+                                    - "null"
+                                  minimum: 0
+                                  maximum: 100
+                                  description: The rate applied to reach `amount`, as a whole percentage. `null`
+                                    when no discount was applied — see
+                                    `baseAmount`. The two are always null
+                                    together.
+                                  examples:
+                                    - 20
+                              required:
+                                - amount
+                                - currency
+                                - baseAmount
+                                - discountPercent
+                            - type: "null"
+                          description: Monthly charge for this number, already discounted, alongside the
+                            discount that produced it. Null when the partner's
+                            wallet is disabled (numbers and SMS are free in that
+                            case), and also null for a pending or a released
+                            number — neither has a next renewal to price. Read
+                            it against the sibling `price` field as "lists at /
+                            you pay next cycle".
+                      required:
+                        - msisdn
+                        - sid
+                        - countryCode
+                        - type
+                        - features
+                        - tagIds
+                        - status
+                        - releasedAt
+                        - gracePeriodEndsAt
+                        - price
+                        - createdAt
+                        - billingState
+                  pagination: *a7
+                required:
+                  - data
+                  - pagination
+        "401": *a8
+    post:
+      tags:
+        - numbers
+      summary: Buy a virtual number
+      description: "Buys one number synchronously and returns it. **NOT idempotent** —
+        a retried request can buy a second number, so never retry it
+        automatically. Throttled 10/min. The wallet is debited only when wallet
+        billing is enabled for your account. To buy many numbers, use `POST
+        /phone-numbers/bulk` instead: this endpoint's rate limit makes
+        one-at-a-time bulk buying impractical."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                msisdn:
+                  type: string
+                  minLength: 5
+                  maxLength: 20
+              required:
+                - msisdn
+      responses:
+        "201":
+          description: Purchased
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: *a9
+                required:
+                  - data
+        "402":
+          description: Insufficient wallet balance — only when wallet_enforced (code 1315)
+          content:
+            application/json:
+              schema: *a3
+        "403":
+          description: Country is not available for this partner (code 1305)
+          content:
+            application/json:
+              schema: *a3
+        "404":
+          description: Phone number is not available for purchase (code 1307)
+          content:
+            application/json:
+              schema: *a3
+        "409":
+          description: Phone number has already been purchased (code 1308)
+          content:
+            application/json:
+              schema: *a3
+        "422":
+          description: Unable to determine country from msisdn (code 1306), or regulated
+            phone numbers are not supported for partners (code 1310)
+          content:
+            application/json:
+              schema: *a3
+        "429": *a8
+        "502":
+          description: Phone number purchase failed, funds not charged (code 1309)
+          content:
+            application/json:
+              schema: *a3
+  /phone-numbers/bulk:
+    get:
+      tags:
+        - numbers
+      summary: List your bulk orders
+      description: >-
+        Your own bulk orders, newest first, scoped to the authenticated partner
+        — there is no parameter that widens that. Ordered by creation time
+        descending, with an id tiebreaker so paging stays stable for orders
+        accepted in the same second.
+
+        Each row is the whole-order summary **without** `items[]`: a page of 30
+        orders of 500 slots would be 15 000 rows nobody asked for. Per-slot
+        detail lives on `GET /phone-numbers/bulk/{orderId}`.
+
+        An empty result is a `200` with `data: []`, never a `404` — a partner
+        with no orders and a `status` filter matching nothing look the same.
+      parameters:
+        - *a4
+        - *a5
+        - name: status
+          in: query
+          description: Filter by order status. Omitted → every order, whatever its state.
+          schema: &a10
+            type: string
+            description: '`pending` queued, not started · `processing` running · `completed`
+              every requested slot delivered a number · `completed_with_errors`
+              at least one slot failed and at least one may have succeeded — the
+              normal partial-success outcome, NOT a rejection · `failed`
+              processing never delivered anything, so `succeeded` is 0 by
+              construction. An order that issued even one number ends
+              `completed_with_errors`, even if its processing job later died
+              permanently. Handle all five values, and treat an unknown value as
+              "still working".'
+            enum:
+              - pending
+              - processing
+              - completed
+              - completed_with_errors
+              - failed
+      responses:
+        "200":
+          description: A page of bulk orders (summaries, no slots)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      description: "One row of the bulk-order list: the same whole-order counters the
+                        status endpoint reports, **without** the slots. The
+                        invariant `requested == succeeded + failed + pending`
+                        holds per row."
+                      properties:
+                        orderId:
+                          type: string
+                          description: ULID
+                        status: *a10
+                        requested:
+                          type: integer
+                          description: Σ requested quantity (immutable)
+                        discountPercent:
+                          type:
+                            - integer
+                            - "null"
+                          minimum: 0
+                          maximum: 100
+                          description: >-
+                            The rate this order was BOUGHT at, frozen once at
+                            acceptance from `active + Σ quantity` and charged on
+                            every slot — slots never re-resolve their own tier,
+                            so the order cannot re-tier itself mid-run.
+
+                            `null` and `0` are different facts: `0` is a
+                            resolved rate of zero (kill switch off, or a Basic
+                            partner), `null` means no rate was ever resolved — a
+                            wallet-disabled partner, who is charged nothing.
+
+                            It will legitimately DISAGREE with
+                            `items[].number.billingPrice.discountPercent`, which
+                            is the partner's current tier, i.e. what each number
+                            renews at next cycle. They diverge whenever the
+                            fleet ends up in a different tier than the order was
+                            quoted from — most often when slots fail on thin
+                            supply, so an order quoted at Pro settles a fleet
+                            earning only Business. Label the two separately
+                            wherever both are shown.
+                        succeeded:
+                          type: integer
+                          description: Slots that delivered a number
+                        failed:
+                          type: integer
+                          description: Slots that ended without a number
+                        pending:
+                          type: integer
+                          description: Slots not yet resolved
+                        createdAt:
+                          type: string
+                          format: date-time
+                        finishedAt:
+                          type:
+                            - string
+                            - "null"
+                          format: date-time
+                          description: Set exactly once, when the order goes terminal. Null until then.
+                      required:
+                        - orderId
+                        - status
+                        - requested
+                        - discountPercent
+                        - succeeded
+                        - failed
+                        - pending
+                        - createdAt
+                        - finishedAt
+                  pagination: *a7
+                required:
+                  - data
+                  - pagination
+        "422":
+          description: "Invalid pagination or an unknown `status`. Envelope B: no `code`."
+          content:
+            application/json:
+              schema: &a11
+                type: object
+                description: Envelope B — framework validation error. Carries NO domain `code`
+                  and no per-field error map; dispatch on `message`. Distinct
+                  from `ApiError` (Envelope A), where `code` is guaranteed.
+                properties:
+                  status:
+                    type: integer
+                    description: HTTP status
+                  message:
+                    type: string
+                  data:
+                    type: "null"
+                required:
+                  - status
+                  - message
+    post:
+      tags:
+        - numbers
+      summary: Order virtual numbers in bulk (asynchronous)
+      description: >-
+        Queues an asynchronous bulk order and returns immediately with an
+        `orderId` — **nothing is provisioned inside this request**. Poll `GET
+        /phone-numbers/bulk/{orderId}` until the order reaches a terminal
+        status. The `numbers.bulk_completed` webhook may push you to refresh
+        sooner, but it is an accelerator, not the channel: a partner with no
+        active endpoint receives nothing, and that is not an error.
+
+        Best-effort **per slot** — an order does not succeed or fail as a unit,
+        and partial success is the normal outcome rather than an error state.
+
+        Two independent caps are enforced: at most **100 request lines**, at
+        most **100 per line**, and the order total `Σ items[].quantity` must be
+        **<= 500**. So five lines of 100 is valid, and a single line of 101 is
+        rejected even though 101 < 500.
+
+        Practical ceiling: the upstream catalog can source at most ~100 distinct
+        numbers per country/type per run, and often fewer in a small country, so
+        one line will not deliver more than that however much is requested.
+        Reaching 500 delivered numbers needs five or more different country/type
+        lines.
+
+        Processing runs on one sequential shared worker, so a large order can
+        take tens of minutes — never block a screen on completion.
+
+        Throttled 5/min per partner, on top of the general 60/min limiter shared
+        with every other call.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: One key per user intent, 1..128 characters. Replaying the same key
+            with the same body returns the same `orderId` and queues nothing
+            new; replaying it with a DIFFERENT body is a 422 — generate a new
+            key when the order changes. Bodies that differ only in JSON key
+            order, `country`/`region` case, `features` order, or `"5"` vs `5`
+            are the same request and will replay.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  description: 1..100 request lines. `Σ items[].quantity` must be <= 500 — a
+                    separate, independent cap from the per-line maximum of 100.
+                    So five lines of 100 is valid, and one line of 101 is
+                    rejected even though 101 < 500.
+                  items: &a12
+                    type: object
+                    description: One request line. `country` and `type` are case-insensitive — the
+                      server upper-cases the country and lower-cases the type.
+                      Duplicate identical lines are legal and are allocated
+                      independently.
+                    properties:
+                      country:
+                        type: string
+                        minLength: 2
+                        maxLength: 2
+                        description: ISO 3166-1 alpha-2. Case-insensitive; upper-cased server-side.
+                      type: *a1
+                      quantity:
+                        type: integer
+                        minimum: 1
+                        maximum: 100
+                        description: 1..100 for this line. Independent of the order total, which must
+                          still be <= 500 across all lines.
+                      features:
+                        type: array
+                        description: Optional. Only "SMS" (upper-case) is accepted here.
+                        items:
+                          type: string
+                          enum:
+                            - SMS
+                      region:
+                        type:
+                          - string
+                          - "null"
+                        maxLength: 100
+                        description: Optional. Sent to the provider with your casing. NOT echoed back on
+                          a slot.
+                    required:
+                      - country
+                      - type
+                      - quantity
+              required:
+                - items
+      responses:
+        "202":
+          description: Accepted and queued. NOT a purchase confirmation and NOT an
+            affordability guarantee — for a wallet_enforced partner the
+            acceptance check is a pre-check over visible catalog prices that
+            reserves nothing, and each number is charged as it is issued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    description: The accept receipt. `status` is always `pending` on a fresh accept
+                      — this is a queue receipt, not a purchase confirmation.
+                    properties:
+                      orderId:
+                        type: string
+                        description: ULID — the order's public id
+                      status: *a10
+                      requested:
+                        type: integer
+                        description: Σ requested quantity. Immutable for the order's lifetime.
+                      discountPercent:
+                        type:
+                          - integer
+                          - "null"
+                        minimum: 0
+                        maximum: 100
+                        description: >-
+                          The rate this order was BOUGHT at, frozen once at
+                          acceptance from `active + Σ quantity` and charged on
+                          every slot — slots never re-resolve their own tier, so
+                          the order cannot re-tier itself mid-run.
+
+                          `null` and `0` are different facts: `0` is a resolved
+                          rate of zero (kill switch off, or a Basic partner),
+                          `null` means no rate was ever resolved — a
+                          wallet-disabled partner, who is charged nothing.
+
+                          It will legitimately DISAGREE with
+                          `items[].number.billingPrice.discountPercent`, which
+                          is the partner's current tier, i.e. what each number
+                          renews at next cycle. They diverge whenever the fleet
+                          ends up in a different tier than the order was quoted
+                          from — most often when slots fail on thin supply, so
+                          an order quoted at Pro settles a fleet earning only
+                          Business. Label the two separately wherever both are
+                          shown.
+                      statusUrl:
+                        type: string
+                        format: uri
+                        description: Ready-made absolute poll URL; equivalent to building it from
+                          `orderId`.
+                    required:
+                      - orderId
+                      - status
+                      - requested
+                      - discountPercent
+                      - statusUrl
+                required:
+                  - data
+        "402":
+          description: Insufficient wallet balance for the order estimate — only when
+            wallet_enforced (code 1315). No order is created.
+          content:
+            application/json:
+              schema: *a3
+        "422":
+          description: 'Validation failure — bad `items`, `quantity <= 0`, an unknown
+            `type`, a 3-letter `country`, `features` other than "SMS", a MISSING
+            `Idempotency-Key`, either cap exceeded, or a key replayed with a
+            different body. Envelope B: no `code` and no per-field error map, so
+            dispatch on `message`.'
+          content:
+            application/json:
+              schema: *a11
+        "429":
+          description: More than 5 accepted bulk requests in a minute, or the general
+            60/min partner limiter. Back off and retry — no order is marked
+            failed.
+          content:
+            application/json:
+              schema: *a3
+        "500":
+          description: Upstream catalog unavailable during the estimate (wallet_enforced
+            only). No order is created, so the same `Idempotency-Key` can be
+            retried cleanly.
+          content:
+            application/json:
+              schema: *a3
+  /phone-numbers/bulk/{orderId}:
+    get:
+      tags:
+        - numbers
+      summary: Get a bulk order's status and per-slot results
+      description: >-
+        Poll this until `status` is terminal (`completed`,
+        `completed_with_errors` or `failed`) — equivalently until `finishedAt`
+        is non-null. Start about 2s after the 202, then back off (2s -> 5s ->
+        10s, capped at 15s), and pause while the tab is hidden. The general
+        limiter is 60 req/min per partner, shared with every other call; on a
+        429, back off and retry rather than treating it as an order failure.
+
+        The counters are **whole-order**; `items[]` is **one page**. Never sum
+        `items[]` to build the totals. Slot rows can change from `pending` to
+        `success`/`failed` between polls, so re-fetch the current page each
+        time.
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          description: ULID identifying a bulk purchase order.
+          schema:
+            type: string
+        - *a4
+        - *a5
+      responses:
+        "200":
+          description: Order status with one page of slots
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    description: Whole-order counters plus ONE page of slots. The invariant
+                      `requested == succeeded + failed + pending` holds at every
+                      poll, while processing and after it finishes; if it ever
+                      breaks, that is a backend bug and must not be papered over
+                      client-side. Once `finishedAt` is set, `pending` is 0.
+                    properties:
+                      orderId:
+                        type: string
+                        description: ULID
+                      status: *a10
+                      requested:
+                        type: integer
+                        description: Σ requested quantity (immutable) — the progress denominator.
+                      discountPercent:
+                        type:
+                          - integer
+                          - "null"
+                        minimum: 0
+                        maximum: 100
+                        description: >-
+                          The rate this order was BOUGHT at, frozen once at
+                          acceptance from `active + Σ quantity` and charged on
+                          every slot — slots never re-resolve their own tier, so
+                          the order cannot re-tier itself mid-run.
+
+                          `null` and `0` are different facts: `0` is a resolved
+                          rate of zero (kill switch off, or a Basic partner),
+                          `null` means no rate was ever resolved — a
+                          wallet-disabled partner, who is charged nothing.
+
+                          It will legitimately DISAGREE with
+                          `items[].number.billingPrice.discountPercent`, which
+                          is the partner's current tier, i.e. what each number
+                          renews at next cycle. They diverge whenever the fleet
+                          ends up in a different tier than the order was quoted
+                          from — most often when slots fail on thin supply, so
+                          an order quoted at Pro settles a fleet earning only
+                          Business. Label the two separately wherever both are
+                          shown.
+                      succeeded:
+                        type: integer
+                        description: Slots that delivered a number, across the whole order.
+                      failed:
+                        type: integer
+                        description: Slots that ended without a number, across the whole order.
+                      pending:
+                        type: integer
+                        description: Slots not yet resolved, across the whole order.
+                      createdAt:
+                        type: string
+                        format: date-time
+                      finishedAt:
+                        type:
+                          - string
+                          - "null"
+                        format: date-time
+                        description: Set exactly once, when the order goes terminal. Null until then, so
+                          it doubles as the terminal detector.
+                      items:
+                        type: array
+                        description: ONE page of slots, ordered stably by creation — never sum these to
+                          build the counters. Can be empty for a page beyond the
+                          last, which does not mean the order is empty. Page
+                          with `page`/`perPage` and `pagination.hasMore`; there
+                          is no `total`.
+                        items:
+                          type: object
+                          description: One slot. `number` is present only when `status` is `success`,
+                            `error` only when it is `failed` — still code
+                            defensively and render the row without the
+                            sub-object rather than crashing. The upstream-provider
+                            field is never emitted in a bulk response. `region` and
+                            `features` are NOT echoed back; keep the submitted
+                            lines client-side if you need them per row.
+                          properties:
+                            country:
+                              type: string
+                              description: Canonical 2-letter country of the request line.
+                            type: *a1
+                            status:
+                              type: string
+                              enum:
+                                - pending
+                                - success
+                                - failed
+                            number: *a9
+                            error:
+                              type: object
+                              description: "Per-slot failure. Dispatch on `code`, and always render `message`
+                                as the fallback — it is a safe backend string
+                                and never contains upstream internals. `1308`
+                                never appears on a slot: it is absorbed by the
+                                retry ladder and surfaces as `1307`."
+                              properties:
+                                code:
+                                  type: integer
+                                  description: 1304 the country code was rejected for that number · 1305 that
+                                    country is not enabled for your account
+                                    (other lines still ran) · 1306 the allocated
+                                    number could not be matched to a country ·
+                                    1307 no number was available — the catalog
+                                    had nothing left for that country/type, or
+                                    every candidate was taken first; retry later
+                                    or pick another country/region · 1309 NOT
+                                    DELIVERED — provisioning failed, or the run
+                                    never got to attempt this slot; it does NOT
+                                    mean the number was refused upstream, and
+                                    retrying the line is reasonable · 1310
+                                    regulated number, unsupported for
+                                    partners · 1315 the wallet ran short while
+                                    this number was being bought — top up and
+                                    re-order the remainder.
+                                  examples:
+                                    - 1307
+                                    - 1309
+                                message:
+                                  type: string
+                              required:
+                                - code
+                                - message
+                          required:
+                            - country
+                            - type
+                            - status
+                    required:
+                      - orderId
+                      - status
+                      - requested
+                      - discountPercent
+                      - succeeded
+                      - failed
+                      - pending
+                      - createdAt
+                      - finishedAt
+                      - items
+                  pagination: *a7
+                required:
+                  - data
+                  - pagination
+        "404":
+          description: Bulk purchase order not found (code 1329) — returned identically
+            for an unknown `orderId` and for an order belonging to another
+            partner, so the response is not an existence oracle.
+          content:
+            application/json:
+              schema: *a3
+        "422":
+          description: "Invalid pagination — `perPage` above 50, `page` below 1, or a
+            non-integer. Envelope B: no `code`."
+          content:
+            application/json:
+              schema: *a11
+  /phone-numbers/quote:
+    post:
+      tags:
+        - catalog
+      summary: Price a prospective order without placing it
+      description: >-
+        Returns what an order of these lines would cost at the partner's CURRENT
+        standing — the undiscounted total, the discounted total, and the rate
+        that produced it. **Nothing is purchased, reserved, frozen or
+        provisioned**, no `Idempotency-Key` is required, and calling it has no
+        effect a client can observe other than the answer. It never answers 402:
+        affordability stays the accept path's question, asked against the
+        balance at acceptance, so submission must not be gated on this figure.
+
+        The discount depends on `activeNumbers + Σ quantity`, so the rate for a
+        10-number order is not the rate shown on a single catalog row, and it
+        cannot be derived from one — a client-side derivation disagrees with the
+        server exactly at the tier boundaries, and disagrees silently. One rate
+        is resolved for the whole order: the same resolution acceptance freezes,
+        through the same pricing code.
+
+        **A quote is indicative, not binding**, for three reasons worth knowing:
+        the order is re-priced at acceptance and the fleet can move in between
+        (including downward, if numbers are released); a line's `pricedQuantity`
+        can fall short of its `quantity` when supply is thin; and the upstream
+        catalog shuffles its results, so the same draft quoted twice can price a
+        different selection of available numbers, varying by the spread of
+        catalog prices for that country/type.
+
+        Accepts the same line shape and the same caps as `POST
+        /phone-numbers/bulk` (1..100 lines, 1..100 per line, `Σ quantity` <=
+        500), so a draft that quotes cleanly is a draft that will not be
+        rejected for its shape. A single catalog row is just `quantity: 1`.
+
+        Throttled **30/min per partner** — debounce the draft rather than
+        quoting on every keystroke.
+
+        Note for implementers: the literal `quote` segment must route ahead of
+        `/phone-numbers/{sid}`, exactly as `/phone-numbers/bulk` already does.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "The same line shape and the same caps as `BulkPurchaseRequest`, so
+                one draft can feed both. Deliberately identical rather than
+                merely similar: a draft that quotes must be a draft that
+                submits."
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items: *a12
+              required:
+                - items
+      responses:
+        "200":
+          description: The estimate. A 200 is NOT an affordability guarantee and NOT a
+            promise of availability — it says nothing about whether the catalog
+            can source the numbers.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    description: >-
+                      An indicative price for a prospective order. Every figure
+                      comes from the server; none of them may be recomputed or
+                      cross-checked client-side.
+
+                      `baseTotal` and `discountedTotal` are ALWAYS both present
+                      and are equal when no discount applies — unlike
+                      `CatalogNumber.discountedPrice`, this schema carries no
+                      null-versus-zero distinction, because a total of "no
+                      discount involved" and a total discounted by 0% are the
+                      same money. The presence of a discount is
+                      `discountPercent`, which is null when none was applied.
+                    properties:
+                      baseTotal:
+                        allOf:
+                          - &a13
+                            type: object
+                            description: >-
+                              A major-unit amount that also carries its exact
+                              4-decimal string.
+
+                              **Render `amountDecimal`, not `amount`.** `amount`
+                              is a JSON number and therefore a float in every
+                              client: partner prices are genuinely sub-cent, and
+                              a 500-number order accumulates visible error.
+                              `amount` is the convenient projection;
+                              `amountDecimal` is the truth. Same rule as the
+                              wallet's `*Decimal` fields.
+                            properties:
+                              amount:
+                                type: number
+                                description: Major-unit decimal, NOT cents. A float projection — convenient for
+                                  comparisons, not for display or for summing.
+                                examples:
+                                  - 22.5
+                              amountDecimal:
+                                type: string
+                                description: Exact magnitude, 4-decimal string. Source of truth for display.
+                                examples:
+                                  - "22.5000"
+                              currency:
+                                type: string
+                                examples:
+                                  - USD
+                            required:
+                              - amount
+                              - amountDecimal
+                              - currency
+                        description: Σ undiscounted price across every priced slot.
+                      discountedTotal:
+                        allOf:
+                          - *a13
+                        description: What the order would cost at the partner's current standing. Equal
+                          to `baseTotal` when no discount applies.
+                      discountPercent:
+                        type:
+                          - integer
+                          - "null"
+                        minimum: 0
+                        maximum: 100
+                        description: >-
+                          The single rate applied across the order, priced at
+                          `activeNumbers + Σ quantity`. Null when no discount
+                          was applied.
+
+                          It is a whole-order rate, not a per-slot one: an order
+                          that spans a tier boundary is priced entirely at the
+                          rate its full quantity reaches, so a partner on 45
+                          active numbers who orders 10 is priced at Pro for all
+                          10 — including the numbers that did the lifting.
+
+                          This is the same resolution acceptance freezes,
+                          through the same pricing code, so a quote and the
+                          frozen rate can differ only because the fleet or the
+                          visible catalog moved in between. That is why the
+                          figure is an estimate and must be labelled as one.
+                      items:
+                        type: array
+                        description: One entry per request line, in the order submitted. Duplicate
+                          identical lines stay separate entries, matching the
+                          bulk endpoint.
+                        items:
+                          type: object
+                          description: >-
+                            The per-line breakdown.
+
+                            **`unit × quantity` does not equal the subtotal, by
+                            construction.** A line names no specific numbers, so
+                            it is priced over the distinct catalog candidates
+                            that country/type can source — the unit figures are
+                            MEANS over a mix of catalog prices, not the price of
+                            any one number. (Integer-micro quantisation adds a
+                            second, smaller disagreement.) Render each field
+                            where it belongs and derive none of them from
+                            another.
+                          properties:
+                            country:
+                              type: string
+                              description: Canonical 2-letter country of the line.
+                            type: *a1
+                            quantity:
+                              type: integer
+                              minimum: 1
+                              maximum: 100
+                              description: What was asked for on this line.
+                            pricedQuantity:
+                              type: integer
+                              minimum: 0
+                              description: >-
+                                How many slots could actually be priced — **can
+                                be below `quantity`** when visible supply for
+                                that country/type is thinner than the line.
+
+                                The subtotals cover `pricedQuantity` slots, not
+                                `quantity` of them. The unpriced slots are NOT
+                                free: they either fail as unavailable (costing
+                                nothing) or are charged by the per-number check
+                                at purchase time. Surface the shortfall; never
+                                scale a subtotal up to `quantity`.
+                            unitBase:
+                              allOf:
+                                - *a13
+                              description: Mean undiscounted price per priced slot on this line (`subtotalBase
+                                / pricedQuantity`). Not any individual number's
+                                price.
+                            unitDiscounted:
+                              allOf:
+                                - *a13
+                              description: Mean discounted price per priced slot. Equal to `unitBase` when no
+                                discount applies.
+                            subtotalBase:
+                              allOf:
+                                - *a13
+                              description: This line's share of `baseTotal`, over `pricedQuantity` slots.
+                            subtotalDiscounted:
+                              allOf:
+                                - *a13
+                              description: This line's share of `discountedTotal`, over `pricedQuantity`
+                                slots.
+                          required:
+                            - country
+                            - type
+                            - quantity
+                            - pricedQuantity
+                            - unitBase
+                            - unitDiscounted
+                            - subtotalBase
+                            - subtotalDiscounted
+                    required:
+                      - baseTotal
+                      - discountedTotal
+                      - discountPercent
+                      - items
+                required:
+                  - data
+        "403":
+          description: A country in the request is not available for this partner (code
+            1305). NOTE this check is **stricter than the accept path** — `POST
+            /phone-numbers/bulk` does not make it, so a draft can quote 403 and
+            still submit.
+          content:
+            application/json:
+              schema: *a3
+        "422":
+          description: "Validation failure — bad `items`, `quantity` outside 1..100, an
+            unknown `type`, a 3-letter `country`, or either cap exceeded.
+            Envelope B: no `code`."
+          content:
+            application/json:
+              schema: *a11
+        "429":
+          description: More than 30 quotes in a minute for this partner. Envelope B. Back
+            off — nothing is wrong with the draft.
+          content:
+            application/json:
+              schema: *a11
+  /phone-numbers/{sid}:
+    get:
+      tags:
+        - numbers
+      summary: Get a purchased number
+      parameters:
+        - &a14
+          name: sid
+          in: path
+          required: true
+          description: ULID identifying an owned phone number.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Number
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: *a9
+                required:
+                  - data
+        "404":
+          description: Phone number not found (code 1311)
+          content:
+            application/json:
+              schema: *a3
+    delete:
+      tags:
+        - numbers
+      summary: Release a purchased number
+      parameters:
+        - *a14
+      responses:
+        "204":
+          description: Released (enters grace period)
+        "404":
+          description: Phone number not found (code 1311)
+          content:
+            application/json:
+              schema: *a3
+        "409":
+          description: Phone number cannot be released in its current status (code 1312)
+          content:
+            application/json:
+              schema: *a3
+  /tags:
+    get:
+      tags:
+        - numbers
+      summary: List the partner's number tags
+      responses:
+        "200":
+          description: Tags
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: &a16
+                      type: object
+                      properties:
+                        id:
+                          type: integer
+                        name:
+                          type: string
+                        color: &a15
+                          type: string
+                          description: Preset palette key; maps to chip classes on the FE (no raw hex).
+                          enum:
+                            - blue
+                            - green
+                            - amber
+                            - red
+                            - violet
+                            - teal
+                            - pink
+                            - slate
+                      required:
+                        - id
+                        - name
+                        - color
+                required:
+                  - data
+        "401": *a8
+    post:
+      tags:
+        - numbers
+      summary: Create a custom tag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  maxLength: 64
+                color: *a15
+              required:
+                - name
+                - color
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: *a16
+                required:
+                  - data
+        "422":
+          description: Invalid tag data (code 1326)
+          content:
+            application/json:
+              schema: *a3
+  /tags/{id}:
+    delete:
+      tags:
+        - numbers
+      summary: Delete a custom tag
+      description: "Permanently deletes the tag and detaches it from every number it
+        is attached to (server-side cascade — the id is removed from each
+        `OwnedNumber.tagIds`). Idempotent: deleting a tag that does not exist
+        (or was already deleted) also returns 204."
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted (cascade-detached from all numbers)
+        "401": *a8
+  /phone-numbers/tags:
+    post:
+      tags:
+        - numbers
+      summary: Bulk add/remove tags across numbers
+      description: "Applies tag changes to several numbers at once. Idempotent: adding
+        a tag a number already has (or removing one it lacks) is a no-op."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sids:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+                add:
+                  type: array
+                  items:
+                    type: integer
+                remove:
+                  type: array
+                  items:
+                    type: integer
+              required:
+                - sids
+      responses:
+        "200":
+          description: Applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      updated:
+                        type: integer
+                    required:
+                      - updated
+                required:
+                  - data
+        "422":
+          description: Invalid tag data (code 1326)
+          content:
+            application/json:
+              schema: *a3
+  /sms:
+    get:
+      tags:
+        - sms
+      summary: List the partner's SMS messages
+      description: "Returns the SMS messages on the numbers **owned by the
+        authenticated partner**, newest first, filtered and paginated
+        server-side. Scoping is enforced by the backend from the session: a
+        partner can never receive an SMS for a number it does not own, and there
+        is no parameter to widen that scope. v1 lists **inbound only**
+        (`direction=received`); the `direction` field and filter exist so
+        outbound can be added without a breaking change. All filters combine
+        with AND; all are optional (no filters → the full history, paginated)."
+      parameters:
+        - name: sender
+          in: query
+          description: Filter by sender number — **case-insensitive substring** match
+            against the stored E.164 number, so a partner can search by the last
+            digits they remember. The client normalizes the input (strips
+            spaces, parentheses and dashes, keeps an optional leading `+` and
+            digits) before sending; the backend should match against the
+            normalized stored value. Requires at least 1 character (empty → omit
+            the param).
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 20
+        - name: recipient
+          in: query
+          description: "Filter by recipient number — your own number the SMS was received
+            on. **Case-insensitive substring** match, normalized exactly like
+            `sender`. Scoping still applies: only your own numbers are ever
+            searched, so a value the partner does not own yields an empty page,
+            never another partner's data. `minLength 1`, `maxLength 20`."
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 20
+        - name: from
+          in: query
+          description: Inclusive lower bound on `receivedAt`, as a **UTC calendar day**
+            (`YYYY-MM-DD`). Interpreted as `receivedAt >= {from}T00:00:00Z`. A
+            bare date (no time) is always interpreted at the start of that UTC
+            day. Must be <= `to` when both are given (else 422).
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          description: Inclusive upper bound on `receivedAt`, as a **UTC calendar day**
+            (`YYYY-MM-DD`). Interpreted as `receivedAt <= {to}T23:59:59.999Z`,
+            so the whole day is included. Must be >= `from` when both are given.
+          schema:
+            type: string
+            format: date
+        - name: direction
+          in: query
+          description: Filter by message direction. Omitted → all directions. Every
+            message today is `received`; the field and this filter exist so
+            outbound can be added without a breaking change.
+          schema: &a17
+            type: string
+            description: Message direction relative to the partner's number. v1 lists only
+              `received` (inbound); `sent` (outbound) is reserved so the list
+              can grow to outbound without a breaking change.
+            enum:
+              - received
+              - sent
+        - name: sort
+          in: query
+          description: Field to sort by. Only `receivedAt` is supported.
+          schema:
+            type: string
+            enum:
+              - receivedAt
+            default: receivedAt
+        - name: order
+          in: query
+          description: Sort direction. Defaults to `desc` (newest first).
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: desc
+        - *a4
+        - *a5
+      responses:
+        "200":
+          description: A page of SMS messages (scoped to the partner's numbers)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      description: One SMS message on a partner-owned number. Times are UTC ISO-8601;
+                        numbers are E.164.
+                      properties:
+                        id:
+                          type: string
+                          description: ULID identifying the message
+                        receivedAt:
+                          type: string
+                          format: date-time
+                          description: UTC ISO-8601 timestamp the message was received (inbound) — the
+                            single sortable/filterable time field.
+                        from:
+                          type: string
+                          description: Sender number in E.164 (the external party, for inbound).
+                        to:
+                          type: string
+                          description: Recipient number in E.164 — always one of the authenticated
+                            partner's own numbers (for inbound).
+                        text:
+                          type: string
+                          description: Message body; may be empty.
+                        direction: *a17
+                      required:
+                        - id
+                        - receivedAt
+                        - from
+                        - to
+                        - text
+                        - direction
+                  pagination: *a7
+                required:
+                  - data
+                  - pagination
+        "401": *a8
+        "422":
+          description: "Invalid query parameters — a malformed date, `perPage` out of
+            range, or `from` later than `to`. Envelope B: **no** domain `code`
+            and no per-field map, so dispatch on `message`."
+          content:
+            application/json:
+              schema: *a11
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: "Bearer authentication with your partner API integration token.
+        Send it as: Authorization: Bearer {api_token}."

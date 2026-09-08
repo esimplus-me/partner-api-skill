@@ -1,0 +1,12 @@
+{
+  "skills": ["partner-api-skill"],
+  "query": "We're a reseller integrating eSIM Plus. Write a Python client that buys a US virtual number and stores the sid.",
+  "files": [],
+  "should_trigger": true,
+  "expected_behavior": [
+    "Uses base URL https://api.esimplus.net/api/partner/v1 with an Authorization: Bearer header",
+    "Calls GET /phone-numbers/countries/US/catalog then POST /phone-numbers with {\"msisdn\": …}",
+    "Reads the sid from response.data.sid (ULID) rather than inventing an id field",
+    "States that POST /phone-numbers is not idempotent and does not wrap it in a retry"
+  ]
+}

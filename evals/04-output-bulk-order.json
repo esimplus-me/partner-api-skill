@@ -1,0 +1,17 @@
+{
+  "skills": ["partner-api-skill"],
+  "query": "We need to buy 300 numbers across the US and Canada through the eSIM Plus partner API and report the results. Write the ordering and polling code.",
+  "files": [],
+  "should_trigger": true,
+  "expected_behavior": [
+    "Quotes the draft, submits with an Idempotency-Key, then polls to a terminal status",
+    "Treats partial success as normal and reports per-slot failures"
+  ],
+  "assertions": [
+    "Sends an Idempotency-Key header on POST /phone-numbers/bulk and reuses the same key on retry",
+    "Respects both caps: 1..100 lines, 1..100 per line, sum of quantity <= 500, and splits 300 across country/type lines of at most 100",
+    "Polls GET /phone-numbers/bulk/{orderId} with backoff until status is completed, completed_with_errors or failed (or finishedAt is non-null)",
+    "Reads whole-order counters from data (succeeded/failed/pending) instead of summing items[]",
+    "Notes that a 202 is not a purchase or affordability guarantee"
+  ]
+}
