@@ -12,6 +12,6 @@
     "Mentions that one HTTP status carries several domain codes and lists at least two codes for 404 (e.g. 1307, 1311, 1321, 1324, 1325, 1329)",
     "States that Envelope B (422/429) has no `code` and no per-field `errors` map, so `body.errors` is wrong",
     "States that POST /phone-numbers is not idempotent and must not be auto-retried",
-    "Does not invent error codes outside 1301-1329, and does not use the retired 1316-1318, 1320 or 1328"
+    "Does not invent error codes outside 1301-1340, and does not use the retired 1316-1318, 1320 or 1328"
   ]
 }

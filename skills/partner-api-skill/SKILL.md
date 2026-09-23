@@ -7,7 +7,7 @@ description: >
   wallet, and receive/verify signed webhooks (`sms.inbound`, `wallet.topped_up`,
   `numbers.bulk_completed`). Use when the user is writing, reviewing, or debugging client
   code against eSIM Plus / esimplus.net partner endpoints — buying virtual phone numbers,
-  polling a bulk order, mapping partner error codes (1301–1329), verifying an
+  polling a bulk order, mapping partner error codes (1301–1340), verifying an
   `X-Esimplus-Signature` header, reconciling wallet amounts, or generating a client from the
   partner OpenAPI spec. Also use for "eSIM Plus API", "partner API token", "esimplus
   webhook", and Russian equivalents ("партнёрский API", "купить виртуальный номер",
@@ -70,6 +70,7 @@ Load `references/host-architecture.md` for the discovery procedure to run before
   `page` default 1, `perPage` default 30, **max 50**. `DELETE` returns `204` with an empty body.
 - **Rate limits (per partner, per minute):** 60 general (shared by everything), 10 buy,
   5 bulk-buy, 30 quote, 10 top-up. A `429` is Envelope B — back off and retry; nothing failed.
+  It carries **no `Retry-After` and no `X-RateLimit-*`**, so the backoff schedule is yours.
 
 ## Workflow
 
@@ -176,9 +177,14 @@ These are the traps that have actually broken integrations. None is guessable fr
 - **`X-Esimplus-Signature` is computed over `{timestamp}.{raw_body}`.** Re-serialising the
   parsed JSON changes bytes and the comparison fails — capture the raw body in your
   framework before any body parser touches it.
-- **A `partner:api` token cannot reach `/settings/*` or `DELETE /auth/session`** → `403`
-  code `1327`. Those are dashboard-session-only. Token and webhook management is a dashboard
-  action, not an API one.
+- **A `partner:api` token cannot reach the dashboard-session routes** → `403` code `1327`.
+  Three families: `/settings/*` and `DELETE /auth/session`; the public auth routes
+  (`/auth/register`, `/auth/email/verify`, `/auth/email/verify/resend`, `/auth/password/forgot`,
+  `/auth/password/reset`, `/auth/invites/*`); and the account routes (`/partner/users*`,
+  `/partner/me*`). Token/webhook management, sign-up, invitations and user administration are
+  all dashboard actions, not API ones — their codes `1330`–`1340` are in `references/errors.md`
+  for completeness and an integration never sees them. Account actions never revoke a
+  `partner:api` token: a password change logs out the person, not the integration.
 
 ## References
 
@@ -186,7 +192,7 @@ These are the traps that have actually broken integrations. None is guessable fr
   architecture, and the conflicts worth escalating. Load it in step 0, before any code.
 - `references/endpoints.md` — every endpoint, request/response shape, query parameter and
   enum. Load it when writing or reviewing a specific call.
-- `references/errors.md` — the two envelopes, the full `1301–1329` code table, and a
+- `references/errors.md` — the two envelopes, the full `1301–1340` code table, and a
   per-endpoint dispatch matrix. Load it in step 2 and whenever handling a failure.
 - `references/bulk-and-pricing.md` — bulk purchase, quoting, the discount ladder, wallet
   money semantics. Load it before implementing multi-number purchase or any pricing display.
