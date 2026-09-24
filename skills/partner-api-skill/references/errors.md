@@ -45,7 +45,8 @@ be `1304`, `1306`, `1310`, `1322`, `1326`, or Envelope B with no code at all; a 
 
 Codes are globally unique across the partner API. Codes `1316`–`1318`, `1320` and `1328` are
 **retired and will never be emitted** — an old client-side table mis-mapped them, so do not
-revive a meaning for them. The next free code is `1330`.
+revive a meaning for them. `1330`–`1340` are allocated to the dashboard account surface and
+listed separately below; the next free code is `1341`.
 
 | code | HTTP | message | Raised by |
 |---|---|---|---|
@@ -77,6 +78,40 @@ revive a meaning for them. The next free code is `1330`.
 `1315` only exists for partners with the per-partner `wallet_enforced` flag on (off by
 default). While it is off, buying never returns `1315` and touches no wallet balance.
 
+### `1330`–`1340` — dashboard account surface (not reachable with a `partner:api` token)
+
+Registration, email verification, password recovery, invitations and user management are
+**dashboard-session routes**. A `partner:api` token on any of them gets `403` / `1327`
+before the route's own logic runs, so an integration never sees these codes. They are listed
+so that the table stays the complete map of the code space and no future allocation collides.
+
+| code | HTTP | meaning | i18n key |
+|---|---|---|---|
+| 1330 | 409 | Email is already registered | `errors.emailTaken` |
+| 1331 | 410 | Invite token invalid, expired or already used | `errors.inviteInvalid` |
+| 1332 | 403 | Action requires a verified email | `errors.emailNotVerified` |
+| 1333 | 410 | Verification token invalid, expired or already used | `errors.verificationInvalid` |
+| 1334 | 410 | Password-reset token invalid, expired or already used | `errors.resetInvalid` |
+| 1335 | 403 | Your role is not allowed to do this | `errors.forbiddenRole` |
+| 1336 | 404 | User not found in this partner | `errors.userNotFound` |
+| 1337 | 409 | A partner must keep at least one active admin | `errors.lastAdmin` |
+| 1338 | 403 | This user account is disabled | `errors.userDisabled` |
+| 1339 | 409 | A pending invite for this address already exists | `errors.inviteExists` |
+| 1340 | 409 | Invite cannot be resent — the person is no longer `invited` | `errors.inviteResendUnavailable` |
+
+Two facts from this surface that matter even though the routes do not:
+
+- **`1335` and `1327` are different failures.** `1335` is "right kind of token, wrong role";
+  `1327` is "wrong kind of token". Only `1327` can ever reach a `partner:api` client.
+- **A domain error's `code` is not always a `13xx`.** The weak-password rejection on those
+  routes is Envelope A with `code: 422` — a code equal to the HTTP status. A handler that
+  assumes `code >= 1300` will mis-bucket it. Nothing on the integration surface does this
+  today, but do not encode the assumption.
+
+Changing a password (or completing a reset) **revokes every dashboard session of that user
+and leaves the partner's `partner:api` tokens working** — tokens belong to the partner, not
+to the person. An integration is never logged out by an account action.
+
 ## Per-endpoint dispatch matrix
 
 | Call | Codes worth handling explicitly |
@@ -90,7 +125,7 @@ default). While it is off, buying never returns `1315` and touches no wallet bal
 | `DELETE /phone-numbers/{sid}` | `1311` not found, `1312` not releasable — leave the UI unchanged and show the reason |
 | tags | `1326` — a duplicate name, an invalid color, or a sid/tag id you do not own |
 | wallet top-up | `1322` provider, `1323` provider outage — retriable, `1321` unknown top-up id |
-| `/settings/*` with a `partner:api` token | `1327` — expected; these are dashboard-only |
+| a dashboard-only route with a `partner:api` token | `1327` — expected. The dashboard-only families are `/settings/*`, `DELETE /auth/session`, the public auth routes (`/auth/register`, `/auth/email/verify*`, `/auth/password/*`, `/auth/invites/*`) and the account routes (`/partner/users*`, `/partner/me*`) |
 
 ## How to write the handler
 
@@ -98,6 +133,9 @@ default). While it is off, buying never returns `1315` and touches no wallet bal
 2. If it has a numeric `code` → Envelope A: switch on `code`.
 3. Otherwise → Envelope B: use `status` + `message`.
 4. Treat `429` as transient (Envelope B): back off and retry — nothing was rejected on merit.
+   **The response carries no `Retry-After` and no `X-RateLimit-*` header** — the exception
+   handler rebuilds the body and drops the exception's headers. Your backoff schedule is a
+   client-side convention; do not write code that reads a wait time off the response.
 5. Retry safely only for `429`, `1323`, and read-path `5xx`. **Never** auto-retry
    `POST /phone-numbers`; retry `POST /phone-numbers/bulk` only with the *same*
    `Idempotency-Key`.

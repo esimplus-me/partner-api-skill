@@ -121,7 +121,7 @@ skills/partner-api-skill/     the skill itself
 ├── references/
 │   ├── host-architecture.md  the house rule: fit the host project's conventions
 │   ├── endpoints.md          every endpoint, shape, query param and enum
-│   ├── errors.md             the two error envelopes + codes 1301–1329
+│   ├── errors.md             the two error envelopes + codes 1301–1340
 │   ├── bulk-and-pricing.md   bulk orders, quoting, the discount ladder, wallet money
 │   └── webhooks.md           delivery, HMAC verification (JS/Python/PHP), retries
 ├── assets/
