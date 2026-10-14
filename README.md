@@ -36,6 +36,7 @@ the plugin manifests so the same repository can be installed as a **Claude Code 
 - What's inside
 - Quick start for a partner
 - Maintaining it
+- Troubleshooting & reporting issues
 - License
 
 ## Install as a plugin (Claude Code)
@@ -176,6 +177,38 @@ python3 ~/.claude/skills/creating-skills/scripts/validate_skill.py skills/partne
 
 A new trap discovered while supporting a partner belongs in the `## Gotchas` section of
 `skills/partner-api-skill/SKILL.md` — that section is the highest-value part of the skill.
+
+## Troubleshooting & reporting issues
+
+Something off with the skill — it doesn't trigger, the installer writes the wrong thing, a
+reference contradicts the live API? **Open a GitHub issue:**
+[github.com/esimplus-me/partner-api-skill/issues](https://github.com/esimplus-me/partner-api-skill/issues/new).
+That is the right place for everything about *this repository*. For your own account, a
+failing production call, a missing scope or a paused token, go to your partner manager or the
+partner dashboard instead — those need a human on our side, not a code change here.
+
+Run through this first; most reports are one of these five.
+
+| Symptom | Check | Fix |
+|---|---|---|
+| The agent ignores the skill | Is `SKILL.md` where the agent looks? (`.claude/skills/partner-api-skill/SKILL.md`, or `.agents/skills/…` plus the pointer file from the table above) | Re-run `./install.sh --agent <name>`; in Claude Code invoke it explicitly once with `/partner-api-skill` |
+| `/plugin install` fails or the plugin is stale | `/plugin` lists it as enabled; version matches `.claude-plugin/plugin.json` | `/plugin marketplace update esimplus`, then `claude plugin update partner-api-skill` |
+| `install.sh` installs for the wrong agents | It autodetects from `.claude/`, `.cursor/`, `.windsurf/`, `.github/`, `AGENTS.md` | Pass `--agent <name>` explicitly; preview with `--dry-run` |
+| `probe_api.py` returns 401/403 | `ESIMPLUS_PARTNER_TOKEN` is exported in *this* shell; code `1360` = expired, `1361` = paused, `1362` = missing scope | Issue a fresh token with the scopes you need (dashboard → Settings → API tokens); see `references/auth-and-scopes.md` |
+| The API answers something the docs don't describe | Compare against `references/endpoints.md` and `references/errors.md` | File an issue — a drifted reference is a bug in this skill |
+
+**What to put in the issue.** Skill version (`version` in `.claude-plugin/plugin.json`), the
+agent and how you installed it (plugin / `install.sh` / manual copy), what you asked the agent
+to do, what it produced, and what you expected. For an API mismatch, add the endpoint, the
+request shape and the error code — the code is the fastest thing to match against the table.
+
+**Never paste a token, a full `Authorization` header, a webhook secret, an
+`X-Esimplus-Signature` over a real payload, or a customer's number or ICCID.** Redact them;
+the error code and the HTTP status carry the diagnosis on their own. If you must show a
+response body, strip `msisdn`, `iccid` and anything under `customer`.
+
+Pull requests are welcome on the same terms — a new trap belongs in the `## Gotchas` section
+of `SKILL.md`, and the maintenance checklist above applies.
 
 ## License
 
