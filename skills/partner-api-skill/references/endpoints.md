@@ -5,6 +5,11 @@ Every path is relative to `https://api.esimplus.net/api/partner/v1`. All calls n
 `{ "data": … }`; lists add `pagination: { page, perPage, hasMore }` (no `total`;
 `perPage` max 50).
 
+**Every integration route also requires a scope on the token** — a missing one is
+`403`/`1362` and the message names it. The scope per route, and the token lifecycle, are in
+`auth-and-scopes.md`. The eSIM plane (`/esims/*`) is in `esim.md`; outbound SMS
+(`POST /sms`, `POST /sms/quote`) is in `outbound-sms.md`.
+
 ## Contents
 - Endpoint index
 - Catalog
@@ -35,7 +40,9 @@ Every path is relative to `https://api.esimplus.net/api/partner/v1`. All calls n
 | POST | `/tags` | 201 |
 | DELETE | `/tags/{id}` | 204 |
 | POST | `/phone-numbers/tags` | 200 |
-| GET | `/sms` | 200 paginated |
+| GET | `/sms` | 200 paginated (**both directions**) |
+| POST | `/sms` | 202 (`200` on an idempotent replay) |
+| POST | `/sms/quote` | 200 |
 | GET | `/stats/sms-received` | 200 |
 | GET | `/wallet` | 200 |
 | GET | `/wallet/transactions` | 200 paginated |
@@ -46,7 +53,13 @@ Every path is relative to `https://api.esimplus.net/api/partner/v1`. All calls n
 | GET | `/partner/profile` | 200 |
 | GET | `/discount-levels` | 200 |
 
-The bulk and quote endpoints are documented in `bulk-and-pricing.md`.
+The eSIM plane adds fourteen more paths under `/esims/*` — see `esim.md` for the index.
+The `/mobile-data/*` catalogue (`countries`, `regions`, `regions/{code}/countries`,
+`countries/{iso}/catalog`, `regions/{code}/catalog`, scope `esim:read`, codes `1313`/`1314`)
+is a separate data-bundle product and is out of scope here.
+
+The bulk and quote endpoints are documented in `bulk-and-pricing.md`, outbound SMS in
+`outbound-sms.md`, eSIMs in `esim.md`.
 
 ## Catalog
 
@@ -133,6 +146,10 @@ Item — **OwnedNumber**:
 ```
 
 - `sid` is a ULID and is the number's public id — use it in every per-number path.
+- **`msisdn` is bare digits, with no leading `+`** — while every SMS surface emits
+  `from`/`to` as E.164 **with** `+`. The two endpoints genuinely disagree; compare by
+  digits. `POST /sms` accepts either spelling, so a value taken straight from here can be
+  sent unchanged.
 - `status`: `1` active, `3` pending, `4` released. Only these three ever surface.
   `gracePeriodEndsAt` is non-null only when `status == 4` (release grace, 14 days).
 - `features` are lowercase and may include `voice` / `mms` — tolerate them.
@@ -185,18 +202,37 @@ Errors: `403`/`1305`, `409`/`1308`, `402`/`1315` (wallet-enforced only), `422`/`
 
 ### `GET /sms`
 
-Inbound SMS on **your own** numbers, newest first. Scope is taken from the token; there is no
-parameter that widens it. v1 is inbound-only (`direction=received`); the field exists so
-outbound can be added without a break. All filters AND together and are optional.
+SMS on **your own** numbers, newest first. Scope is taken from the token; there is no
+parameter that widens it. It lists **both directions**, interleaved
+chronologically — outbound rows carry `direction: "sent"` plus optional lifecycle and price
+fields. All filters AND together and are optional.
 
 Query: `sender` (case-insensitive substring on the stored E.164 value — normalise your input
 by stripping spaces, parens and dashes, keeping an optional leading `+`; min 1 char),
 `recipient` (same matching, 1..20 — a number you do not own yields an empty page, never
 someone else's data), `from` / `to` (UTC calendar days `YYYY-MM-DD`, inclusive:
 `from` → `>= fromT00:00:00Z`, `to` → `<= toT23:59:59.999Z`; `from > to` is `422`),
-`direction`, `sort` (`receivedAt` only), `order` (default `desc`), `page`, `perPage`.
+`direction` (`received` | `sent`), `sort` (`receivedAt` only), `order` (default `desc`),
+`page`, `perPage`.
 
 Invalid params → `422` **Envelope B** (no code) — dispatch on `message`.
+
+Item — **Sms**. Required on every row: `id` (ULID), `receivedAt`, `from`, `to`, `text`,
+`direction`. Outbound rows add `status`, `segments`, `encoding`, `priceMinor`, `currency`,
+`sentAt`, `deliveredAt`, `failedAt`, and (when blocked) `blockedReason` / `blockedDetail`.
+
+- **Optional fields are absent, not `null`, when they do not apply.** Test for presence.
+- **`receivedAt` is the single sortable/filterable time field for both directions** — "when
+  the platform recorded this message": arrival for inbound, acceptance for outbound. The name
+  is inherited, not descriptive; it is what lets the two interleave.
+- `from` / `to` are canonical **E.164 with `+`**, while `OwnedNumber.msisdn` has none.
+  Compare by digits, never as strings.
+
+### `POST /sms` and `POST /sms/quote`
+
+Sending and pricing an outbound message — scopes `sms:send` and `sms:read`, an **`202`** on
+accept, a **required `Idempotency-Key`**, two independent ceilings on `text`, and a total that
+must not be recomputed from the unit price. All of it is in `outbound-sms.md`.
 
 ## Stats
 
@@ -315,13 +351,24 @@ save X%" copy on `profile.discountPercent > 0`.
 
 These require a short-lived `partner:dashboard` session token from `POST /auth/login`. A
 `partner:api` token gets `403`/`1327`. Listed so you know where they live, not to call them
-from an integration: `DELETE /auth/session`, `GET|POST /settings/api-tokens`,
-`DELETE /settings/api-tokens/{id}`, `GET|PUT|DELETE /settings/webhook`,
-`POST /partner/agreements/accept`.
+from an integration:
 
-**Consequence for integrators:** creating/revoking API tokens and configuring the webhook URL
-(which returns the signing secret once, on `PUT`) are human dashboard actions. Do not design
-a self-provisioning flow around them.
+- **API tokens** — `GET /settings/api-token-scopes`, `GET|POST /settings/api-tokens`,
+  `PATCH|DELETE /settings/api-tokens/{id}`, `POST /settings/api-tokens/{id}/rotate`.
+- **Webhook endpoints** — `GET /settings/webhook-events`, `GET|POST /settings/webhooks`,
+  `PATCH|DELETE /settings/webhooks/{id}`, `POST /settings/webhooks/{id}/secret`,
+  `POST /settings/webhooks/{id}/test`. The V1 `GET|PUT|DELETE /settings/webhook` routes were
+  **removed**, not deprecated.
+- **Session and account** — `DELETE /auth/session`, `POST /partner/agreements/accept`, the
+  public auth routes and `/partner/users*` / `/partner/me*`.
+
+All `/settings/*` routes are **administrator-only in their entirety, the reads included**;
+minting a credential (token create/rotate, endpoint create/secret-rotate) and deleting a
+token additionally require a verified email (`1332`).
+
+**Consequence for integrators:** provisioning tokens and configuring callback endpoints —
+each of which returns its secret **once** — are human dashboard actions. Do not design a
+self-provisioning flow around them. Details in `auth-and-scopes.md`.
 
 ## Enum reference
 
@@ -334,3 +381,19 @@ a self-provisioning flow around them.
 - bulk order `status`: `pending`, `processing`, `completed`, `completed_with_errors`, `failed`.
 - bulk slot `status`: `pending`, `success`, `failed`.
 - `PartnerAccountLevel`: `basic`, `startup`, `business`, `pro`, `vip` (ladder order).
+- SMS `direction`: `received`, `sent`.
+- `SmsStatus` (outbound only): `queued`, `under_review`, `sent`, `delivered`, `failed`,
+  `blocked` — published in full; only `queued`, `sent`, `delivered` and `failed` occur today.
+- `SmsBlockedReason`: `content_policy`, `sending_pattern`, `recipient_opted_out`,
+  `recipient_blocked`, `destination_not_permitted`, `manual_review` — no producer today.
+- `SmsEncoding`: `GSM7`, `UCS2`.
+- `EsimStatus` (**string**, unlike the owned-number integer `status`): `pending`, `active`,
+  `suspended`, `deleted`.
+- `EsimFeature`: `voice`, `sms`, `data` — a separate enum from the phone-number `Feature`
+  (`voice`, `sms`, `mms`). Not merged.
+- `EsimUsageKind`: `voice`, `data`, `sms`; `EsimUsageUnit`: `seconds`, `megabytes`, `messages`
+  (bound to the kind).
+- API-token scopes: see the thirteen keys in `auth-and-scopes.md`.
+- Webhook events: `sms.inbound`, `sms.outbound.sent`, `sms.outbound.delivered`,
+  `sms.outbound.failed`, `wallet.topped_up`, `numbers.bulk_completed`, `esims.bulk_completed`,
+  `esim.topped_up` (subscribable) and `webhook.test` (not subscribable).

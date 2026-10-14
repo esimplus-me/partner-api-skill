@@ -4,8 +4,14 @@ info:
   version: 1.0.0
   description: >-
     Integration contract for the eSIM Plus Partner API: buy and manage virtual
-    phone numbers one at a time or in bulk, organize them with tags, and read
+    phone numbers one at a time or in bulk, send and price outbound SMS, buy and
+    manage eSIM profiles, organize everything with tags, and read
     the SMS they receive.
+
+    - Every route requires a SCOPE on the token (`numbers:read`, `sms:send`,
+      `esim:write`, …). A token missing it answers 403 with domain code 1362 and
+      the message names the scope. A token can also be expired (401/1360) or
+      paused (401/1361); none of the three is retryable.
 
     - Every success body is `{ "data": <payload> }`; list endpoints add a
       sibling `pagination` (offset-based, no `total`).
@@ -26,6 +32,7 @@ tags:
   - name: catalog
   - name: numbers
   - name: sms
+  - name: esim
 paths:
   /phone-numbers/countries:
     get:
@@ -1549,9 +1556,10 @@ paths:
         authenticated partner**, newest first, filtered and paginated
         server-side. Scoping is enforced by the backend from the session: a
         partner can never receive an SMS for a number it does not own, and there
-        is no parameter to widen that scope. v1 lists **inbound only**
-        (`direction=received`); the `direction` field and filter exist so
-        outbound can be added without a breaking change. All filters combine
+        is no parameter to widen that scope. Lists **both directions** —
+        outbound rows carry `direction: sent` plus the optional lifecycle and
+        price fields below, and interleave with inbound ones in one
+        chronological list. All filters combine
         with AND; all are optional (no filters → the full history, paginated)."
       parameters:
         - name: sender
@@ -1602,9 +1610,9 @@ paths:
             outbound can be added without a breaking change.
           schema: &a17
             type: string
-            description: Message direction relative to the partner's number. v1 lists only
-              `received` (inbound); `sent` (outbound) is reserved so the list
-              can grow to outbound without a breaking change.
+            description: Message direction relative to the partner's number.
+              `received` is inbound, `sent` is outbound; `GET /sms` lists both,
+              interleaved chronologically.
             enum:
               - received
               - sent
@@ -1661,6 +1669,37 @@ paths:
                           type: string
                           description: Message body; may be empty.
                         direction: *a17
+                        status:
+                          $ref: "#/components/schemas/SmsStatus"
+                        blockedReason:
+                          $ref: "#/components/schemas/SmsBlockedReason"
+                        blockedDetail:
+                          type: string
+                          description: Human-readable explanation of a block. Present only when
+                            `status` is `blocked`.
+                        segments:
+                          type: integer
+                          minimum: 1
+                          description: Billed segment count (outbound only).
+                        encoding:
+                          $ref: "#/components/schemas/SmsEncoding"
+                        priceMinor:
+                          type: integer
+                          description: Amount charged in integer minor units (outbound only). A
+                            ROUNDING of the exact decimal charged, not the charge
+                            itself — $0.0060 reports 1.
+                        currency:
+                          type: string
+                          description: ISO-4217 code (outbound only).
+                        sentAt:
+                          type: string
+                          format: date-time
+                        deliveredAt:
+                          type: string
+                          format: date-time
+                        failedAt:
+                          type: string
+                          format: date-time
                       required:
                         - id
                         - receivedAt
@@ -1680,6 +1719,904 @@ paths:
           content:
             application/json:
               schema: *a11
+    post:
+      tags:
+        - sms
+      summary: Send an SMS from one of your numbers
+      description: >-
+        Sends an SMS from one of your own numbers. Scope: `sms:send`. Both token
+        kinds may send and there is NO role gate.
+
+
+        Answers 202, not 201 — the message is accepted and queued and has not yet
+        reached a carrier. The hand-off is asynchronous, so a provider problem
+        appears later as `status: failed` on the message rather than as an error
+        on this call. There is deliberately no 502 and no 403/1327 here.
+
+
+        Two independent ceilings apply to `text` and the second is not implied by
+        the first: at most 1530 characters AND at most 10 segments. 1530 Cyrillic
+        characters is roughly 23 segments — well formed by maxLength and refused
+        all the same.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: >-
+            Client-generated key that makes a retry safe. REQUIRED — a network
+            retry without one would send, and charge for, a second message. The
+            same key with the same body replays the original message; the same
+            key with a different body is refused with 409/1356. The replay is
+            evaluated BEFORE your balance.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendSmsRequest"
+      responses:
+        "202":
+          description: "Accepted and queued — visible through `GET /sms` with
+            `direction: sent` and `status: queued`."
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Sms"
+                required:
+                  - data
+        "200":
+          description: Idempotent replay — this key was already used with an identical
+            body. The original message is returned unchanged; nothing was sent or
+            charged twice.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Sms"
+                required:
+                  - data
+        "401":
+          $ref: "#/components/responses/PartnerDomainError"
+        "402":
+          description: Balance cannot cover the message (code 1315), checked against
+            `availableBalance`. Nothing was created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "404":
+          description: "`from` is not a number your account owns (code 1311) — the same
+            answer as for an unknown number."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "409":
+          description: This Idempotency-Key was already used with a DIFFERENT body
+            (code 1356). Nothing was sent; use a new key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "422":
+          description: >-
+            Dispatch on the domain code: 1357 malformed (message carries the
+            specific field error), 1354 that number cannot originate messages,
+            1352 blocked by policy, 1353 recipient opted out, 1355 destination not
+            permitted. `errors` is always [] here.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "429":
+          $ref: "#/components/responses/PartnerThrottled"
+  /sms/quote:
+    post:
+      tags:
+        - sms
+      summary: What an outbound SMS would cost
+      description: >-
+        Prices a message without sending it. A POST because the body carries the
+        text, but it reads without writing: nothing is stored, held or queued, it
+        is safe to repeat, and it takes NO Idempotency-Key. The answer is an
+        ESTIMATE — pricing is recalculated at acceptance. It applies the same
+        ownership and sendability refusals the send path does, and has its own
+        rate limit separate from sending. Scope: `sms:read`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SmsQuoteRequest"
+      responses:
+        "200":
+          description: The estimated cost
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/SmsQuote"
+                required:
+                  - data
+        "401":
+          $ref: "#/components/responses/PartnerDomainError"
+        "404":
+          description: "`from` is not a number your account owns (code 1311)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "422":
+          description: Malformed body (code 1357) or a `from` that cannot originate
+            messages (code 1354).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "429":
+          $ref: "#/components/responses/PartnerThrottled"
+  /esims/destinations:
+    get:
+      tags:
+        - esim
+      summary: List eSIM destinations (coverage bundles) available for purchase
+      description: >-
+        A destination is a coverage BUNDLE, not a country: "Estonia + United
+        Kingdom" is one product. `code` is an opaque slug and is NOT an ISO code
+        even when it looks like one. Not paginated. Scope: `esim:read`.
+      responses:
+        "200":
+          description: Destinations
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EsimDestination"
+                required:
+                  - data
+        "401":
+          $ref: "#/components/responses/PartnerDomainError"
+  /esims/destinations/{code}/catalog:
+    get:
+      tags:
+        - esim
+      summary: List eSIM profiles available for purchase in a destination
+      description: >-
+        A catalog row is a SNAPSHOT, never a reservation, and partner demand
+        shares one profile pool with the consumer app — 1342 is a real race. A
+        known destination with zero free profiles returns an EMPTY PAGE, not a
+        404. Scope: `esim:read`.
+      parameters:
+        - $ref: "#/components/parameters/EsimDestinationCode"
+        - $ref: "#/components/parameters/PartnerPage"
+        - $ref: "#/components/parameters/PartnerPerPage"
+      responses:
+        "200":
+          description: Offers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EsimOffer"
+                  pagination:
+                    $ref: "#/components/schemas/PartnerPagination"
+                required:
+                  - data
+                  - pagination
+        "401":
+          $ref: "#/components/responses/PartnerDomainError"
+        "404":
+          description: Unknown destination slug (code 1341).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+  /esims:
+    get:
+      tags:
+        - esim
+      summary: List the eSIMs you own
+      description: "Scope: `esim:read`. Array query params need PHP bracket notation
+        (`country[]=EE&country[]=GB`). Rows with a null `extraPhoneNumber` sort
+        LAST in both directions."
+      parameters:
+        - name: country
+          in: query
+          description: ISO alpha-2 codes (repeatable), match-ANY, matched against the
+            primary OR the extra country.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+              minLength: 2
+              maxLength: 2
+        - name: phoneNumber
+          in: query
+          schema:
+            type: string
+            maxLength: 20
+        - name: extraPhoneNumber
+          in: query
+          schema:
+            type: string
+            maxLength: 20
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/EsimStatus"
+        - name: tags
+          in: query
+          description: Tag ids (repeatable), match-ANY — the same `/tags` plane the
+            phone numbers use.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: integer
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum:
+              - icc
+              - phoneNumber
+              - extraPhoneNumber
+              - createdAt
+              - balance
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: desc
+        - $ref: "#/components/parameters/PartnerPage"
+        - $ref: "#/components/parameters/PartnerPerPage"
+      responses:
+        "200":
+          description: Owned eSIMs page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Esim"
+                  pagination:
+                    $ref: "#/components/schemas/PartnerPagination"
+                required:
+                  - data
+                  - pagination
+        "401":
+          $ref: "#/components/responses/PartnerDomainError"
+    post:
+      tags:
+        - esim
+      summary: Buy one eSIM profile
+      description: >-
+        Buys one profile synchronously and returns it. Scope: `esim:write`.
+        NOT IDEMPOTENT — a retried request can buy a second profile, and an
+        `Idempotency-Key` header is IGNORED here rather than honoured. Throttled
+        10/min, the same bucket as POST /phone-numbers.
+
+
+        Two figures leave the wallet as ONE charge: it is debited
+        `offer.price + package.price`, and the SIM is delivered carrying
+        `package.price` on its own balance. The package code is resolved against
+        the OFFER — pp-3 is $23.00 single-number and $25.00 dual-number.
+
+
+        The returned `status` is `pending` and `activation` is null: claiming a
+        profile and provisioning it upstream are not one transaction, and there
+        is no activation webhook. Re-read GET /esims/{icc}.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                offerId:
+                  type: string
+                  minLength: 1
+                  description: An `offerId` from the destination catalog. Opaque — never
+                    construct, parse or infer one.
+                prepaidPackage:
+                  type: string
+                  minLength: 1
+                  description: A `code` from that offer's `prepaidPackages`. REQUIRED —
+                    there is no "no package" purchase. A code outside the offer's
+                    own ladder is a plain 422 with no domain code.
+              required:
+                - offerId
+                - prepaidPackage
+      responses:
+        "201":
+          description: Purchased
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/Esim"
+                required:
+                  - data
+        "402":
+          description: Insufficient wallet balance (code 1315).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "403":
+          description: Unverified email (code 1332) or missing scope (code 1362).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "404":
+          description: Destination gone (code 1341) or the offer was taken first
+            (code 1342).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "429":
+          $ref: "#/components/responses/PartnerThrottled"
+        "502":
+          description: Provisioning failed (code 1345) — the WHOLE debit is refunded,
+            profile half included.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+  /esims/tags:
+    post:
+      tags:
+        - esim
+      summary: Bulk add/remove tags across eSIMs
+      description: >-
+        The twin of POST /phone-numbers/tags over the same `/tags` plane — only
+        the identifier list differs (`iccs` rather than `sids`). Idempotent.
+        Scope: `tags:write`. NOTE: `updated` here counts the eSIMs that ACTUALLY
+        CHANGED (a redundant add returns 0), while the phone-number twin returns
+        the number of sids handed to it. The divergence is deliberate.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                iccs:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+                add:
+                  type: array
+                  items:
+                    type: integer
+                remove:
+                  type: array
+                  items:
+                    type: integer
+              required:
+                - iccs
+      responses:
+        "200":
+          description: Applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      updated:
+                        type: integer
+                    required:
+                      - updated
+                required:
+                  - data
+        "422":
+          description: Invalid tag data (code 1326) — includes an icc or tag id that is
+            not yours.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+  /esims/bulk:
+    get:
+      tags:
+        - esim
+      summary: List your bulk eSIM orders
+      description: "Scope: `esim:read`. Rows are the counters WITHOUT `items[]`."
+      parameters:
+        - $ref: "#/components/parameters/PartnerPage"
+        - $ref: "#/components/parameters/PartnerPerPage"
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/EsimBulkOrderStatus"
+      responses:
+        "200":
+          description: A page of orders
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EsimBulkOrderSummary"
+                  pagination:
+                    $ref: "#/components/schemas/PartnerPagination"
+                required:
+                  - data
+                  - pagination
+        "422":
+          description: Invalid query parameters — Envelope B, no domain code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerValidationError"
+    post:
+      tags:
+        - esim
+      summary: Order eSIM profiles in bulk (asynchronous)
+      description: >-
+        Queues an order and answers 202 immediately — a QUEUE RECEIPT, never a
+        purchase confirmation. Scope: `esim:write`. Throttled 5/min.
+
+
+        THREE independent caps, none implying another: at most 10 lines, at most
+        50 per line, and the sum of quantities at most 100. Two lines of 50 is
+        valid; one line of 51 is not.
+
+
+        `prepaidPackage` is per LINE, not per order, and is part of the
+        idempotency fingerprint: the same key with a different package is a
+        DIFFERENT order, not a replay.
+
+
+        Runs on its own queue, so a large eSIM order does not queue behind a
+        large number order. There is no `discountPercent` anywhere on this plane.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 10
+                  items:
+                    type: object
+                    properties:
+                      destination:
+                        type: string
+                        minLength: 2
+                        maxLength: 32
+                        description: Destination slug from GET /esims/destinations.
+                          Case-insensitive; echoed back canonicalised on each slot.
+                      quantity:
+                        type: integer
+                        minimum: 1
+                        maximum: 50
+                      prepaidPackage:
+                        type: string
+                        minLength: 1
+                        description: A `code` from that destination's `prepaidPackages`,
+                          applied to every profile the line delivers.
+                    required:
+                      - destination
+                      - quantity
+                      - prepaidPackage
+              required:
+                - items
+      responses:
+        "202":
+          description: Queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EsimBulkPurchaseAccepted"
+                required:
+                  - data
+        "402":
+          description: Insufficient wallet balance (code 1315) — no order created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "403":
+          description: Unverified email (code 1332) or missing scope (code 1362).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "422":
+          description: Cap violation, missing Idempotency-Key, or a key replayed with a
+            different body — Envelope B, no domain code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerValidationError"
+        "429":
+          $ref: "#/components/responses/PartnerThrottled"
+  /esims/bulk/{orderId}:
+    get:
+      tags:
+        - esim
+      summary: Get a bulk eSIM order's status and per-slot results
+      description: >-
+        THE GUARANTEED RESULT CHANNEL. Poll until `finishedAt` is non-null.
+        `requested == succeeded + failed + pending` holds at every poll, and the
+        counters are WHOLE-ORDER while `items[]` is one page — never sum the
+        slots. Scope: `esim:read`.
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/PartnerPage"
+        - $ref: "#/components/parameters/PartnerPerPage"
+      responses:
+        "200":
+          description: Order status with one page of slots
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EsimBulkOrder"
+                  pagination:
+                    $ref: "#/components/schemas/PartnerPagination"
+                required:
+                  - data
+                  - pagination
+        "404":
+          description: Unknown order OR another partner's order (code 1348) — identical
+            answers, so this is not an existence oracle. Note the phone-number
+            plane uses 1329 for the same situation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "422":
+          description: Invalid pagination — Envelope B, no domain code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerValidationError"
+  /esims/{icc}:
+    get:
+      tags:
+        - esim
+      summary: Read one owned eSIM
+      description: "Scope: `esim:read`. `activation` is null while `status` is
+        `pending`. The SM-DP+ address is NOT a separate field — it is the middle
+        segment of `activationCode`."
+      parameters:
+        - $ref: "#/components/parameters/EsimIcc"
+      responses:
+        "200":
+          description: The eSIM
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EsimDetail"
+                required:
+                  - data
+        "404":
+          description: eSIM not found (code 1343).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+    delete:
+      tags:
+        - esim
+      summary: Delete (terminate) an eSIM
+      description: "Scope: `esim:write`. THE SIM'S REMAINING BALANCE IS FORFEITED — it
+        does not return to the partner wallet."
+      parameters:
+        - $ref: "#/components/parameters/EsimIcc"
+      responses:
+        "204":
+          description: Terminated
+        "404":
+          description: eSIM not found (code 1343).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "409":
+          description: Not deletable in its current status (code 1344).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+  /esims/{icc}/usage:
+    get:
+      tags:
+        - esim
+      summary: Itemized spend on an eSIM (calls, data, SMS)
+      description: >-
+        Scope: `esim:read`. THE FEED IS VOICE-ONLY: the provider exposes one CDR
+        command and it returns call records, so `data` and `sms` buckets report
+        real zeros with their correct units. `from` DEFAULTS TO 30 DAYS AGO and
+        `to` to now — omitting them is not "all time".
+
+
+        The CDR is account-wide upstream with no per-ICC endpoint, so every page
+        costs one account-wide provider call: do not poll this. Record ids are
+        deterministic, so de-duplicating by id is safe. Record `cost` carries 4
+        decimals — render `summary`, never the sum of `data[]`.
+      parameters:
+        - $ref: "#/components/parameters/EsimIcc"
+        - name: kind
+          in: query
+          description: Narrows the SUMMARY as well as the page.
+          schema:
+            $ref: "#/components/schemas/EsimUsageKind"
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - $ref: "#/components/parameters/PartnerPage"
+        - $ref: "#/components/parameters/PartnerPerPage"
+      responses:
+        "200":
+          description: Usage page plus the period summary
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EsimUsageRecord"
+                  summary:
+                    $ref: "#/components/schemas/EsimUsageSummary"
+                  pagination:
+                    $ref: "#/components/schemas/PartnerPagination"
+                required:
+                  - data
+                  - summary
+                  - pagination
+        "404":
+          description: eSIM not found (code 1343).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+  /esims/{icc}/credentials:
+    post:
+      tags:
+        - esim
+      summary: Reveal PIN1/PIN2/PUK1/PUK2 for an eSIM
+      description: >-
+        Scope: `esim:credentials`. A POST although it reads: a reveal is an
+        audited, rate-limited event and a GET would be replayed by caches,
+        prefetch and history. THERE IS NO GET ALIAS — a GET answers 405. Served
+        Cache-Control: no-store. Throttled 5/min on its own bucket, the lowest in
+        the partner plane. Do not cache, log or persist these values.
+      parameters:
+        - $ref: "#/components/parameters/EsimIcc"
+      responses:
+        "200":
+          description: Credentials — do not persist, do not log
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EsimCredentials"
+                required:
+                  - data
+        "403":
+          description: Wrong token kind (code 1327) or missing scope (code 1362). Not a
+            role gate — both dashboard roles may reveal.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "404":
+          description: eSIM not found (code 1343).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "409":
+          description: The provider could not return credentials right now (code 1346) —
+            RETRYABLE.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "429":
+          $ref: "#/components/responses/PartnerThrottled"
+  /esims/{icc}/topups:
+    get:
+      tags:
+        - esim
+      summary: Top-up history for an eSIM
+      description: "Scope: `esim:read`. THE GUARANTEED CHANNEL: the SIM is credited only
+        when a top-up reaches `completed`, never when the browser lands on
+        `successUrl`."
+      parameters:
+        - $ref: "#/components/parameters/EsimIcc"
+        - $ref: "#/components/parameters/PartnerPage"
+        - $ref: "#/components/parameters/PartnerPerPage"
+      responses:
+        "200":
+          description: A page of top-ups
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EsimTopup"
+                  pagination:
+                    $ref: "#/components/schemas/PartnerPagination"
+                required:
+                  - data
+                  - pagination
+        "404":
+          description: eSIM not found (code 1343).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+    post:
+      tags:
+        - esim
+      summary: Top up the balance of an eSIM
+      description: >-
+        Scope: `esim:topup`, and the ONE eSIM route that is administrator-only —
+        a member may spend the partner's balance on inventory but may not open a
+        payment provider. Throttled 10/min, verified email required.
+
+
+        This money lands on the SIM, NOT in the partner wallet, and the two never
+        net. The providers are the existing GET /wallet/topups/providers list;
+        there is no eSIM-specific one.
+
+
+        THE DOCUMENTED MINIMUM OF 100 IS UNREACHABLE: every configured provider's
+        band starts at 500, so 100..499 is contract-valid and always answers
+        409/1347. Read the band from the providers endpoint and floor the control
+        at 500.
+      parameters:
+        - $ref: "#/components/parameters/EsimIcc"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount:
+                  type: integer
+                  minimum: 100
+                  maximum: 1000000
+                  description: Integer cents — the one place on the eSIM surface where
+                    money is not a Price object.
+                provider:
+                  type: string
+                  description: A provider id from GET /wallet/topups/providers. This is a
+                    PAYMENT provider, not the eSIM supplier.
+                successUrl:
+                  type: string
+                  format: uri
+                  description: https only, no credentials, host must resolve, no private or
+                    reserved address. A rejection is a 422 with no domain code.
+                failureUrl:
+                  type: string
+                  format: uri
+              required:
+                - amount
+                - provider
+                - successUrl
+                - failureUrl
+      responses:
+        "201":
+          description: Top-up created — redirect the partner to `payUrl`
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/EsimTopup"
+                required:
+                  - data
+        "403":
+          description: Member role (code 1335), unverified email (code 1332) or missing
+            scope (code 1362). A partner:api token is not role-gated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "404":
+          description: eSIM not found (code 1343).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "409":
+          description: The amount is outside the chosen provider's band, or the slug is
+            unknown (code 1347) — the pairing failed, not a field.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerApiError"
+        "422":
+          description: Malformed body or an SSRF-rejected URL — Envelope B, no code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PartnerValidationError"
+        "429":
+          $ref: "#/components/responses/PartnerThrottled"
 components:
   securitySchemes:
     bearerAuth:
@@ -1687,3 +2624,782 @@ components:
       scheme: bearer
       description: "Bearer authentication with your partner API integration token.
         Send it as: Authorization: Bearer {api_token}."
+  parameters:
+    PartnerPage:
+      name: page
+      in: query
+      description: 1-based page number. Default 1.
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PartnerPerPage:
+      name: perPage
+      in: query
+      description: Items per page. Default 30, MAXIMUM 50.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 50
+        default: 30
+    EsimDestinationCode:
+      name: code
+      in: path
+      required: true
+      description: Opaque destination slug, e.g. "EE-GB". NOT an ISO country code.
+      schema:
+        type: string
+        minLength: 2
+        maxLength: 32
+    EsimIcc:
+      name: icc
+      in: path
+      required: true
+      description: ICCID, 19-20 digits. The eSIM's identity in this API. Spelled `icc`,
+        not `iccid`.
+      schema:
+        type: string
+  responses:
+    PartnerDomainError:
+      description: Envelope A — a domain error carrying a numeric `code`. Dispatch on
+        the code, never on the HTTP status.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PartnerApiError"
+    PartnerThrottled:
+      description: Rate limited. Envelope B — NO domain code, NO Retry-After and NO
+        X-RateLimit-* headers. Back off on your side; nothing failed on merit.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PartnerValidationError"
+  schemas:
+    PartnerPagination:
+      type: object
+      description: Offset pagination. There is deliberately no `total`.
+      properties:
+        page:
+          type: integer
+        perPage:
+          type: integer
+        hasMore:
+          type: boolean
+      required:
+        - page
+        - perPage
+        - hasMore
+    PartnerApiError:
+      type: object
+      description: Envelope A. `errors` is [] for almost every code; 1304 carries
+        `isoCodes`, 1314 carries `code`, 1363 carries `scopes`.
+      properties:
+        success:
+          type: boolean
+        status:
+          type: integer
+        message:
+          type: string
+        code:
+          type: integer
+        errors: {}
+      required:
+        - status
+        - message
+        - code
+    PartnerValidationError:
+      type: object
+      description: Envelope B — framework validation, SSRF rejection and throttling. NO
+        `code` and no per-field map; dispatch on `message`.
+      properties:
+        status:
+          type: integer
+        message:
+          type: string
+        data:
+          type: "null"
+      required:
+        - status
+        - message
+    PartnerPrice:
+      type: object
+      description: Money in MAJOR units. A whole amount serialises as an integer (PHP
+        emits 3, not 3.0) — decode `amount` as a float/number, never an int.
+      properties:
+        amount:
+          type: number
+        currency:
+          type: string
+      required:
+        - amount
+        - currency
+    SmsDirection:
+      type: string
+      enum:
+        - received
+        - sent
+    SmsStatus:
+      type: string
+      description: >-
+        Outbound lifecycle, present only when `direction` is `sent`. The FULL set
+        is published so that it never grows on you — switching exhaustively today
+        will not break tomorrow. Only `queued`, `sent`, `delivered` and `failed`
+        occur in this release; `under_review` and `blocked` have no producer yet.
+      enum:
+        - queued
+        - under_review
+        - sent
+        - delivered
+        - failed
+        - blocked
+    SmsBlockedReason:
+      type: string
+      description: Published in full, with no producer in this release — no message is
+        blocked today.
+      enum:
+        - content_policy
+        - sending_pattern
+        - recipient_opted_out
+        - recipient_blocked
+        - destination_not_permitted
+        - manual_review
+    SmsEncoding:
+      type: string
+      description: Any character outside GSM-03.38 (Cyrillic, most emoji) forces UCS-2
+        and more than halves the characters per segment.
+      enum:
+        - GSM7
+        - UCS2
+    Sms:
+      type: object
+      description: >-
+        One SMS on a partner-owned number, in either direction. Outbound fields
+        were added ADDITIVELY and every optional field below is ABSENT, NOT NULL,
+        when it does not apply — test for presence, not for a null.
+
+
+        `from`/`to` are canonical E.164 WITH the leading `+`, while
+        `OwnedNumber.msisdn` carries none: compare the two by digits.
+      properties:
+        id:
+          type: string
+          description: ULID identifying the message.
+        receivedAt:
+          type: string
+          format: date-time
+          description: When the platform RECORDED this message — arrival for inbound,
+            acceptance for outbound. The name is inherited, not descriptive. The
+            single sortable and filterable time field for both directions.
+        from:
+          type: string
+        to:
+          type: string
+        text:
+          type: string
+        direction:
+          $ref: "#/components/schemas/SmsDirection"
+        status:
+          $ref: "#/components/schemas/SmsStatus"
+        blockedReason:
+          $ref: "#/components/schemas/SmsBlockedReason"
+        blockedDetail:
+          type: string
+        segments:
+          type: integer
+          minimum: 1
+        encoding:
+          $ref: "#/components/schemas/SmsEncoding"
+        priceMinor:
+          type: integer
+          description: A ROUNDING of the exact decimal charged, not the charge itself.
+        currency:
+          type: string
+        sentAt:
+          type: string
+          format: date-time
+        deliveredAt:
+          type: string
+          format: date-time
+        failedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - receivedAt
+        - from
+        - to
+        - text
+        - direction
+    SendSmsRequest:
+      type: object
+      properties:
+        from:
+          type: string
+          description: One of your own numbers, as an MSISDN (not a sid). The leading `+`
+            is OPTIONAL on input — a value taken straight from GET /phone-numbers
+            can be sent unchanged.
+        to:
+          type: string
+          description: Recipient. The leading `+` is optional on input.
+        text:
+          type: string
+          minLength: 1
+          maxLength: 1530
+          description: May NOT be empty. Two ceilings apply and the second is not implied
+            by the first - 1530 characters AND 10 segments. Count segments before
+            sending.
+      required:
+        - from
+        - to
+        - text
+    SmsQuoteRequest:
+      type: object
+      properties:
+        from:
+          type: string
+        to:
+          type: string
+        text:
+          type: string
+          minLength: 1
+          maxLength: 1530
+      required:
+        - from
+        - to
+        - text
+    SmsQuote:
+      type: object
+      description: What a message WOULD cost. An estimate — the server re-prices at
+        acceptance.
+      properties:
+        segments:
+          type: integer
+          minimum: 1
+        encoding:
+          $ref: "#/components/schemas/SmsEncoding"
+        unitPriceMinor:
+          type: integer
+          description: Price of ONE segment, rounded separately. Informational only.
+        totalPriceMinor:
+          type: integer
+          description: >-
+            THIS IS NOT unitPriceMinor x segments AND MUST NOT BE RECOMPUTED AS
+            SUCH. Both are roundings of exact values; the total is projected from
+            the exact decimal so that it equals the priceMinor the accepted
+            message reports. At $0.006 a segment, two segments are
+            unitPriceMinor 1 and totalPriceMinor 1. Render as returned.
+        currency:
+          type: string
+      required:
+        - segments
+        - encoding
+        - unitPriceMinor
+        - totalPriceMinor
+        - currency
+    EsimFeature:
+      type: string
+      description: A SEPARATE enum from the phone-number Feature (voice/sms/mms). Not
+        merged.
+      enum:
+        - voice
+        - sms
+        - data
+    EsimStatus:
+      type: string
+      description: >-
+        A STRING, unlike the owned-number integer `status`. `pending` is
+        REACHABLE AND NORMAL — claiming a profile and provisioning it upstream
+        are not one transaction, and there is no activation webhook, so a client
+        discovers the transition by re-reading.
+      enum:
+        - pending
+        - active
+        - suspended
+        - deleted
+    EsimPrepaidPackage:
+      type: object
+      description: >-
+        `code` is the stable tier handle a purchase sends back; `price` is BOTH
+        what the wallet is debited for the package and what lands on the SIM's
+        balance. Tier codes are stable across destinations; PRICES ARE NOT.
+        Render `price`, send `code`, compute neither.
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 32
+        price:
+          $ref: "#/components/schemas/PartnerPrice"
+      required:
+        - code
+        - price
+    EsimDestination:
+      type: object
+      description: >-
+        One purchasable coverage bundle. eSIM prices carry NO DISCOUNT FIELDS
+        anywhere, bulk included — partner tier discounts apply to phone numbers
+        and not to eSIMs, and the keys are absent rather than null.
+      properties:
+        code:
+          type: string
+          description: Opaque destination slug, e.g. "EE-GB". NOT an ISO code.
+        name:
+          type: string
+        countryCodes:
+          type: array
+          minItems: 1
+          maxItems: 2
+          description: ORDERED — index 0 is the primary number's country, index 1 the
+            extra number's. One entry means a single-number profile.
+          items:
+            type: string
+            minLength: 2
+            maxLength: 2
+        features:
+          type: array
+          items:
+            $ref: "#/components/schemas/EsimFeature"
+        prepaidPackages:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/EsimPrepaidPackage"
+        availableCount:
+          type: integer
+          minimum: 0
+          description: A hint for the UI, NOT a reservation — it can be stale by the time
+            the catalog page is read.
+        fromPrice:
+          $ref: "#/components/schemas/PartnerPrice"
+      required:
+        - code
+        - name
+        - countryCodes
+        - features
+        - prepaidPackages
+        - availableCount
+        - fromPrice
+    EsimOffer:
+      type: object
+      description: A profile on sale. NOTHING HERE IS RESERVED.
+      properties:
+        offerId:
+          type: string
+          description: OPAQUE URL-safe handle — never construct, parse or infer one.
+        phoneNumber:
+          type: string
+        extraPhoneNumber:
+          type:
+            - string
+            - "null"
+          description: Null on a single-number product. Null and "the same as the primary"
+            are different facts; never fall back to the primary for display.
+        countryCode:
+          type: string
+        extraCountryCode:
+          type:
+            - string
+            - "null"
+        price:
+          $ref: "#/components/schemas/PartnerPrice"
+        features:
+          type: array
+          items:
+            $ref: "#/components/schemas/EsimFeature"
+        prepaidPackages:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/EsimPrepaidPackage"
+        dataIncludedMb:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+      required:
+        - offerId
+        - phoneNumber
+        - extraPhoneNumber
+        - countryCode
+        - extraCountryCode
+        - price
+        - features
+        - prepaidPackages
+    Esim:
+      type: object
+      description: An eSIM you own. `balance` is the SIM's OWN calling credit and is a
+        different money from the partner wallet — they never net.
+      properties:
+        icc:
+          type: string
+        phoneNumber:
+          type: string
+        extraPhoneNumber:
+          type:
+            - string
+            - "null"
+        countryCode:
+          type: string
+        extraCountryCode:
+          type:
+            - string
+            - "null"
+        status:
+          $ref: "#/components/schemas/EsimStatus"
+        balance:
+          $ref: "#/components/schemas/PartnerPrice"
+        tagIds:
+          type: array
+          items:
+            type: integer
+        price:
+          $ref: "#/components/schemas/PartnerPrice"
+        createdAt:
+          type: string
+          format: date-time
+        activatedAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+      required:
+        - icc
+        - phoneNumber
+        - extraPhoneNumber
+        - countryCode
+        - extraCountryCode
+        - status
+        - balance
+        - tagIds
+        - price
+        - createdAt
+        - activatedAt
+    EsimActivation:
+      type: object
+      description: What the end customer's phone consumes. The SM-DP+ address is NOT a
+        separate field — it is the middle segment of `activationCode`.
+      properties:
+        activationCode:
+          type: string
+        qrCodeUrl:
+          type:
+            - string
+            - "null"
+          format: uri
+      required:
+        - activationCode
+        - qrCodeUrl
+    EsimDetail:
+      allOf:
+        - $ref: "#/components/schemas/Esim"
+        - type: object
+          properties:
+            activation:
+              oneOf:
+                - $ref: "#/components/schemas/EsimActivation"
+                - type: "null"
+            lastUsedAt:
+              type:
+                - string
+                - "null"
+              format: date-time
+          required:
+            - activation
+    EsimCredentials:
+      type: object
+      description: SIM secrets. Returned by one endpoint only, never cached, never
+        logged, never persisted by a client.
+      properties:
+        pin1:
+          type: string
+        pin2:
+          type: string
+        puk1:
+          type: string
+        puk2:
+          type: string
+      required:
+        - pin1
+        - pin2
+        - puk1
+        - puk2
+    EsimBulkOrderStatus:
+      type: string
+      enum:
+        - pending
+        - processing
+        - completed
+        - completed_with_errors
+        - failed
+    EsimBulkOrderItemStatus:
+      type: string
+      enum:
+        - pending
+        - success
+        - failed
+    EsimBulkPurchaseAccepted:
+      type: object
+      description: A QUEUE RECEIPT, not a purchase confirmation. `status` is always
+        `pending` on a fresh accept.
+      properties:
+        orderId:
+          type: string
+        status:
+          $ref: "#/components/schemas/EsimBulkOrderStatus"
+        requested:
+          type: integer
+        statusUrl:
+          type: string
+          format: uri
+      required:
+        - orderId
+        - status
+        - requested
+        - statusUrl
+    EsimBulkOrderSummary:
+      type: object
+      properties:
+        orderId:
+          type: string
+        status:
+          $ref: "#/components/schemas/EsimBulkOrderStatus"
+        requested:
+          type: integer
+        succeeded:
+          type: integer
+        failed:
+          type: integer
+        pending:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+      required:
+        - orderId
+        - status
+        - requested
+        - succeeded
+        - failed
+        - pending
+        - createdAt
+        - finishedAt
+    EsimBulkOrderItemError:
+      type: object
+      description: >-
+        Per-slot failure inside a 200. 1341 the destination is no longer
+        available; 1342 the profile this slot tried to take was bought first;
+        1345 NOT DELIVERED — the provider could not issue a profile, or the run
+        never attempted this slot, and nothing was charged; 1315 the wallet ran
+        short mid-run.
+      properties:
+        code:
+          type: integer
+        message:
+          type: string
+      required:
+        - code
+        - message
+    EsimBulkOrderItem:
+      type: object
+      description: One slot. `esim` is present only on `success`, `error` only on
+        `failed` — still code defensively.
+      properties:
+        destination:
+          type: string
+        status:
+          $ref: "#/components/schemas/EsimBulkOrderItemStatus"
+        esim:
+          $ref: "#/components/schemas/Esim"
+        error:
+          $ref: "#/components/schemas/EsimBulkOrderItemError"
+      required:
+        - destination
+        - status
+    EsimBulkOrder:
+      type: object
+      description: Whole-order counters plus ONE page of slots. Never sum `items[]` to
+        build the counters. Once `finishedAt` is set, `pending` is 0.
+      properties:
+        orderId:
+          type: string
+        status:
+          $ref: "#/components/schemas/EsimBulkOrderStatus"
+        requested:
+          type: integer
+        succeeded:
+          type: integer
+        failed:
+          type: integer
+        pending:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: Set exactly once, when the order goes terminal — it doubles as the
+            terminal detector.
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/EsimBulkOrderItem"
+      required:
+        - orderId
+        - status
+        - requested
+        - succeeded
+        - failed
+        - pending
+        - createdAt
+        - finishedAt
+        - items
+    EsimUsageKind:
+      type: string
+      enum:
+        - voice
+        - data
+        - sms
+    EsimUsageUnit:
+      type: string
+      description: Bound to `kind` - voice/seconds, data/megabytes, sms/messages.
+      enum:
+        - seconds
+        - megabytes
+        - messages
+    EsimUsageVolume:
+      type: object
+      properties:
+        unit:
+          $ref: "#/components/schemas/EsimUsageUnit"
+        value:
+          type: number
+          minimum: 0
+      required:
+        - unit
+        - value
+    EsimUsageRecord:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Opaque and DETERMINISTIC — the same call keeps its id across pages,
+            so de-duplicating by id is safe.
+        occurredAt:
+          type: string
+          format: date-time
+        kind:
+          $ref: "#/components/schemas/EsimUsageKind"
+        description:
+          type: string
+          description: Server-rendered English label. Display it, do not parse it.
+        direction:
+          type:
+            - string
+            - "null"
+          enum:
+            - inbound
+            - outbound
+            - null
+        volume:
+          $ref: "#/components/schemas/EsimUsageVolume"
+        cost:
+          allOf:
+            - $ref: "#/components/schemas/PartnerPrice"
+          description: Carries 4 DECIMALS, not 2 — a per-call charge is genuinely
+            sub-cent. Render `summary`, do not add `data[]` up.
+      required:
+        - id
+        - occurredAt
+        - kind
+        - description
+        - direction
+        - volume
+        - cost
+    EsimUsageBucket:
+      type: object
+      properties:
+        volume:
+          $ref: "#/components/schemas/EsimUsageVolume"
+        cost:
+          $ref: "#/components/schemas/PartnerPrice"
+      required:
+        - volume
+        - cost
+    EsimUsageSummary:
+      type: object
+      description: Totals over the WHOLE selected period, computed server-side. `data[]`
+        is one page and must never be summed into a total.
+      properties:
+        voice:
+          $ref: "#/components/schemas/EsimUsageBucket"
+        data:
+          $ref: "#/components/schemas/EsimUsageBucket"
+        sms:
+          $ref: "#/components/schemas/EsimUsageBucket"
+        totalCost:
+          $ref: "#/components/schemas/PartnerPrice"
+      required:
+        - voice
+        - data
+        - sms
+        - totalCost
+    EsimTopupStatus:
+      type: string
+      enum:
+        - pending
+        - completed
+        - failed
+        - expired
+    EsimTopup:
+      type: object
+      description: Credit added to a SIM. Shaped like the wallet Topup on purpose, but
+        this money lands ON THE SIM, not in the wallet.
+      properties:
+        id:
+          type: string
+        icc:
+          type: string
+        status:
+          $ref: "#/components/schemas/EsimTopupStatus"
+        amount:
+          type: integer
+          description: Integer cents.
+        provider:
+          type: string
+          description: The PAYMENT provider, not the eSIM supplier.
+        payUrl:
+          type:
+            - string
+            - "null"
+          format: uri
+        expiresAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        completedAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+      required:
+        - id
+        - icc
+        - status
+        - amount
+        - provider
+        - payUrl
+        - expiresAt
+        - createdAt
+        - completedAt

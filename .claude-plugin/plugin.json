@@ -1,7 +1,7 @@
 {
   "name": "partner-api-skill",
-  "description": "eSIM Plus Partner API integration skill: virtual-number catalog, single and bulk purchase, quoting, tags, inbound SMS, wallet, and signed webhooks — with the as-built contract, error-code table and integration gotchas.",
-  "version": "1.1.0",
+  "description": "eSIM Plus Partner API integration skill: scoped tokens, the virtual-number catalog, single and bulk purchase of numbers and eSIMs, quoting, tags, inbound and outbound SMS, wallet, and signed webhooks — with the as-built contract, error-code table and integration gotchas.",
+  "version": "1.2.0",
   "author": {
     "name": "eSIM Plus",
     "url": "https://esimplus.me"
@@ -13,6 +13,7 @@
     "esimplus",
     "partner-api",
     "virtual-numbers",
+    "esim",
     "sms",
     "webhooks",
     "api-integration"

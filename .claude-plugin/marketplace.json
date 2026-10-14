@@ -6,21 +6,21 @@
   },
   "metadata": {
     "description": "Agent skills published by eSIM Plus for partners integrating our APIs.",
-    "version": "1.1.0"
+    "version": "1.2.0"
   },
   "plugins": [
     {
       "name": "partner-api-skill",
       "source": "./",
-      "description": "Integrate the eSIM Plus Partner API correctly: catalog, single and bulk number purchase, quoting, tags, inbound SMS, wallet, signed webhooks.",
-      "version": "1.1.0",
+      "description": "Integrate the eSIM Plus Partner API correctly: catalog, single and bulk purchase of numbers and eSIMs, quoting, tags, inbound and outbound SMS, wallet, signed webhooks.",
+      "version": "1.2.0",
       "author": {
         "name": "eSIM Plus",
         "url": "https://esimplus.me"
       },
       "homepage": "https://github.com/esimplus-me/partner-api-skill",
       "license": "MIT",
-      "keywords": ["esimplus", "partner-api", "virtual-numbers", "webhooks"]
+      "keywords": ["esimplus", "partner-api", "virtual-numbers", "esim", "sms", "webhooks"]
     }
   ]
 }

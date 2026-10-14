@@ -4,7 +4,7 @@
 
 **Ship a correct integration with the eSIM Plus Partner API on the first try.**
 
-Virtual numbers · bulk orders · inbound SMS · wallet · signed webhooks
+Virtual numbers · eSIMs · bulk orders · inbound & outbound SMS · wallet · signed webhooks
 
 [![Agent Skill](https://img.shields.io/badge/Agent%20Skill-open%20standard-6b5bd6)](https://agentskills.io/specification)
 [![Skill](https://img.shields.io/badge/skill-partner--api--skill-2253f5)](skills/partner-api-skill/SKILL.md)
@@ -19,8 +19,9 @@ Virtual numbers · bulk orders · inbound SMS · wallet · signed webhooks
 
 An [Agent Skill](https://agentskills.io/specification) that teaches a coding agent (Claude
 Code, Cursor, Codex, or anything that reads the open-standard `SKILL.md` format) how to
-integrate the **eSIM Plus Partner API** correctly: bearer auth, the virtual-number catalog,
-single and bulk purchase, quoting, tags, inbound SMS, the wallet, and signed webhooks.
+integrate the **eSIM Plus Partner API** correctly: scoped bearer auth, the virtual-number
+catalog, single and bulk purchase, quoting, tags, inbound and outbound SMS, the eSIM plane,
+the wallet, and signed webhooks.
 
 Hand this repository to a partner and their agent stops guessing: it gets the as-built
 contract, the error-code table, the traps that break integrations, and two runnable helper
@@ -120,14 +121,17 @@ skills/partner-api-skill/     the skill itself
 ├── SKILL.md                  the workflow and the gotchas that cause most bugs
 ├── references/
 │   ├── host-architecture.md  the house rule: fit the host project's conventions
+│   ├── auth-and-scopes.md    the token lifecycle, the scopes, the four refusals
 │   ├── endpoints.md          every endpoint, shape, query param and enum
-│   ├── errors.md             the two error envelopes + codes 1301–1340
+│   ├── errors.md             the two error envelopes + codes 1301–1363
 │   ├── bulk-and-pricing.md   bulk orders, quoting, the discount ladder, wallet money
-│   └── webhooks.md           delivery, HMAC verification (JS/Python/PHP), retries
+│   ├── outbound-sms.md       sending and pricing SMS, segments, idempotency, lifecycle
+│   ├── esim.md               destinations, offers, purchase, usage, PIN/PUK, top-ups
+│   └── webhooks.md           the endpoint collection, HMAC verification, retries
 ├── assets/
 │   └── partner-api.openapi.yaml   OpenAPI 3.1 spec — feed it to a client generator
 └── scripts/
-    ├── probe_api.py          read-only token check: does it auth, what can it reach
+    ├── probe_api.py          read-only token check: does it auth, which scopes it holds
     └── verify_webhook.py     verify/produce X-Esimplus-Signature (pinned test vector)
 install.sh                    one-command installer for Claude/Cursor/Codex/Copilot/Windsurf
 evals/                        trigger + output-conformance scenarios

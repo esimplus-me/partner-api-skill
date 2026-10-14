@@ -4,6 +4,9 @@
 Use it to check a captured delivery, or to sign a fixture so you can replay a realistic
 signed request at your own receiver. Stdlib only, no network.
 
+A partner keeps a LIST of callback endpoints, each with its OWN secret. Pass
+the secret of the endpoint that received the request — there is no account-wide key.
+
 Usage:
     # confirm the algorithm on the pinned test vector
     python3 verify_webhook.py --self-test

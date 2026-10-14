@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""Probe an eSIM Plus Partner API token: does it authenticate, and what can it reach?
+"""Probe an eSIM Plus Partner API token: does it authenticate, and which scopes does it hold?
 
 Read-only. Every request is a GET against a listing endpoint, so nothing is bought,
 charged or configured. Stdlib only.
+
+Every integration route demands a scope on the token, so a 403/1362 here
+means "this token cannot do that group" — not that the request was wrong. Write-only scopes
+(numbers:write, sms:send, esim:write, esim:topup, esim:credentials, tags:write,
+wallet:topup) cannot be probed read-only and are reported as unknown.
 
 Usage:
     python3 probe_api.py --token "$ESIMPLUS_PARTNER_TOKEN"
@@ -28,21 +33,38 @@ import urllib.request
 
 DEFAULT_BASE_URL = "https://api.esimplus.net/api/partner/v1"
 
-# (group, path) — read-only endpoints, ordered cheapest first.
-PROBES: list[tuple[str, str]] = [
-    ("profile", "/partner/profile"),
-    ("catalog", "/phone-numbers/countries"),
-    ("numbers", "/phone-numbers?perPage=1"),
-    ("bulk", "/phone-numbers/bulk?perPage=1"),
-    ("tags", "/tags"),
-    ("sms", "/sms?perPage=1"),
-    ("wallet", "/wallet"),
-    ("discounts", "/discount-levels"),
+# (group, path, scope) — read-only endpoints, ordered cheapest first.
+PROBES: list[tuple[str, str, str]] = [
+    ("profile", "/partner/profile", "partner:read"),
+    ("discounts", "/discount-levels", "partner:read"),
+    ("catalog", "/phone-numbers/countries", "numbers:read"),
+    ("numbers", "/phone-numbers?perPage=1", "numbers:read"),
+    ("bulk orders", "/phone-numbers/bulk?perPage=1", "numbers:read"),
+    ("tags", "/tags", "tags:read"),
+    ("sms", "/sms?perPage=1", "sms:read"),
+    ("sms stats", "/stats/sms-received?days=1", "sms:read"),
+    ("esim catalog", "/esims/destinations", "esim:read"),
+    ("esims", "/esims?perPage=1", "esim:read"),
+    ("esim bulk orders", "/esims/bulk?perPage=1", "esim:read"),
+    ("wallet", "/wallet", "wallet:read"),
     # Dashboard-only: a partner:api token is EXPECTED to get 403/1327 here.
-    ("settings (dashboard-only)", "/settings/api-tokens"),
+    ("settings (dashboard-only)", "/settings/api-tokens", "—"),
 ]
 
-AUTH_CODES = {1301: "partner not found", 1302: "unauthenticated", 1303: "partner disabled"}
+# Scopes no read-only probe can exercise.
+UNPROBEABLE_SCOPES = [
+    "numbers:write", "sms:send", "esim:write", "esim:credentials", "esim:topup",
+    "tags:write", "wallet:topup",
+]
+
+AUTH_CODES = {
+    1301: "partner not found",
+    1302: "unauthenticated",
+    1303: "partner disabled",
+    1360: "token expired — mint a new one, the partner cannot undo this",
+    1361: "token disabled (paused) — ask the partner to re-enable it",
+}
+SCOPE_FORBIDDEN = 1362
 
 
 def ssl_context() -> ssl.SSLContext:
@@ -102,11 +124,11 @@ def main() -> int:
     transport_failures = 0
     auth_failure: dict | None = None
 
-    for group, path in PROBES:
+    for group, path, scope in PROBES:
         status, body, err = request(base + path, args.token, args.timeout)
         code = body.get("code") if isinstance(body, dict) else None
         message = body.get("message") if isinstance(body, dict) else None
-        results.append({"group": group, "path": path, "status": status,
+        results.append({"group": group, "path": path, "scope": scope, "status": status,
                         "code": code, "message": message, "error": err})
 
         if status == 0:
@@ -118,16 +140,19 @@ def main() -> int:
         print(json.dumps({"baseUrl": base, "probes": results}, indent=2))
     else:
         print(f"Base URL: {base}\n")
-        width = max(len(g) for g, _ in PROBES)
+        width = max(len(g) for g, _, _ in PROBES)
+        swidth = max(len(sc) for _, _, sc in PROBES)
         for r in results:
             if r["status"] == 0:
                 verdict = f"UNREACHABLE  {r['error']}"
             elif 200 <= r["status"] < 300:
                 verdict = f"ok           {r['status']}"
+            elif r["code"] == SCOPE_FORBIDDEN:
+                verdict = f"NO SCOPE     403/1362 — {r['message']}"
             else:
                 detail = f"code {r['code']}" if r["code"] else "no domain code (envelope B)"
                 verdict = f"{r['status']:<12} {detail} — {r['message']}"
-            print(f"  {r['group']:<{width}}  {verdict}")
+            print(f"  {r['group']:<{width}}  {r['scope']:<{swidth}}  {verdict}")
         print()
 
     if transport_failures == len(PROBES):
@@ -152,6 +177,11 @@ def main() -> int:
         elif 200 <= (settings["status"] or 0) < 300:
             print("Token reaches /settings/* — this is a partner:dashboard SESSION token, "
                   "short-lived (24h). Use a partner:api token for an integration.")
+        missing = sorted({r["scope"] for r in results if r["code"] == SCOPE_FORBIDDEN})
+        if missing:
+            print("Scopes this token does NOT hold: " + ", ".join(missing))
+        print("Not probeable read-only (grant deliberately, then test against a sandbox "
+              "partner): " + ", ".join(UNPROBEABLE_SCOPES))
         provider_hint = next((r for r in results if r["group"] == "catalog"), None)
         if provider_hint and 200 <= (provider_hint["status"] or 0) < 300:
             print("Catalog is reachable; an extra upstream-provider key on a catalog item "

@@ -1,4 +1,7 @@
-# Bulk purchase, quoting and pricing
+# Bulk purchase, quoting and pricing (phone numbers)
+
+Everything here is the **phone-number** plane. The eSIM plane has its own bulk endpoints with
+different caps, its own order-id namespace and **no discounts at all** — see `esim.md`.
 
 ## Contents
 - The flow in one picture
@@ -239,7 +242,9 @@ Three behaviours worth surfacing in any UI:
 
 Where the discount shows up: catalog (`discountedPrice`), quote (both totals), single
 purchase and bulk (wallet ledger rows carry `baseAmount` / `discountPercent`), monthly
-renewal (repriced each cycle). **Never** on inbound-SMS charges, and n/a on top-ups.
+renewal (repriced each cycle). **Never** on inbound-SMS charges, **never on outbound SMS**,
+**never on eSIMs** (the keys are absent there, not null, and a test asserts it), and n/a on
+top-ups.
 
 **Kill switch.** The whole ladder sits behind one global, environment-level switch — not
 per-partner, with no API to read it. While it is off: `profile.discountPercent` is `0` (while

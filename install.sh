@@ -129,24 +129,29 @@ write_pointer_body() {  # shared prose for the non-Claude adapters; $1 = relativ
   POINTER_BODY_FILE=$(mktemp)
   cat > "$POINTER_BODY_FILE" <<EOF
 When the task touches the **eSIM Plus Partner API** (\`api.esimplus.net/api/partner/v1\`) —
-buying or releasing virtual phone numbers, the number catalog, bulk orders and quoting, tags,
-inbound SMS, the partner wallet, partner error codes 1301-1329, or verifying an
-\`X-Esimplus-Signature\` webhook — read \`$1/SKILL.md\` first and follow it.
+buying or releasing virtual phone numbers or eSIMs, the catalogs, bulk orders and quoting,
+tags, inbound or outbound SMS, the partner wallet, token scopes, partner error codes
+1301-1363, or verifying an \`X-Esimplus-Signature\` webhook — read \`$1/SKILL.md\` first and
+follow it.
 
 It carries the as-built contract, so do not guess field names, error codes or the signature
 algorithm. Load the files it points to as needed:
 
 - \`$1/references/host-architecture.md\` — fit the integration into THIS project's
   architecture (read before writing code).
+- \`$1/references/auth-and-scopes.md\` — the token lifecycle and the scope each route needs.
 - \`$1/references/endpoints.md\` — endpoints, request/response shapes, enums.
 - \`$1/references/errors.md\` — the two error envelopes and the domain-code table.
 - \`$1/references/bulk-and-pricing.md\` — bulk orders, quoting, discounts, wallet money.
-- \`$1/references/webhooks.md\` — delivery, HMAC verification, retries, idempotency.
+- \`$1/references/outbound-sms.md\` — sending and pricing SMS, segments, idempotency.
+- \`$1/references/esim.md\` — the eSIM plane: offers, purchase, usage, PIN/PUK, top-ups.
+- \`$1/references/webhooks.md\` — the endpoint collection, HMAC verification, retries.
 - \`$1/assets/partner-api.openapi.yaml\` — OpenAPI 3.1 spec for client generation.
 
-Non-negotiable: \`POST /phone-numbers\` is not idempotent (never auto-retry it), array query
-params need PHP brackets (\`tags[]=\`), and the webhook signature is computed over the raw
-request body.
+Non-negotiable: \`POST /phone-numbers\` and \`POST /esims\` are not idempotent (never
+auto-retry them), \`POST /sms\` requires an \`Idempotency-Key\`, array query params need PHP
+brackets (\`tags[]=\`), and the webhook signature is computed over the raw request body with
+the secret of the endpoint that received it.
 EOF
 }
 
