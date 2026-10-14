@@ -11,7 +11,7 @@ Virtual numbers · eSIMs · bulk orders · inbound & outbound SMS · wallet · s
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)](#install-as-a-plugin-claude-code)
 [![API](https://img.shields.io/badge/API-partner%2Fv1-1f6feb)](skills/partner-api-skill/assets/partner-api.openapi.yaml)
 [![Scripts](https://img.shields.io/badge/scripts-python%203.9%2B%20stdlib-3776ab)](skills/partner-api-skill/scripts/)
-[![License](https://img.shields.io/badge/license-MIT-green)](#license)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 </div>
 
@@ -179,4 +179,5 @@ A new trap discovered while supporting a partner belongs in the `## Gotchas` sec
 
 ## License
 
-MIT — as declared in `SKILL.md` frontmatter.
+MIT — see [`LICENSE`](LICENSE). The same declaration appears in the `SKILL.md` frontmatter
+and in both plugin manifests.
